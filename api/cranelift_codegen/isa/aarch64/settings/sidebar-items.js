@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":[["builder","Create a `settings::Builder` for the arm64 settings group."]],"struct":[["Flags","Flags group `arm64`."]]};
