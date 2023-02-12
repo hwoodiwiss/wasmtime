@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 pub mod systemv;
 
 #[cfg(feature = "unwind")]
+pub mod winaarch64;
+
+#[cfg(feature = "unwind")]
 pub mod winx64;
 
 /// Represents unwind information for a single function.
