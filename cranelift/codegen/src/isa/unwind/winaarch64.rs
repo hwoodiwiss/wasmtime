@@ -51,10 +51,7 @@ impl<'a> Writer<'a> {
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub(crate) enum UnwindCode {
     //
-    StackAlloc {
-        instruction_offset: u8,
-        size: u32,
-    },
+    StackAlloc { instruction_offset: u8, size: u32 },
 }
 
 impl UnwindCode {
@@ -69,7 +66,9 @@ impl UnwindCode {
             SaveXmm128 = 8,
             SaveXmm128Far = 9,
         }
-        unimplemented!("Not implemented yet, x86_64 implementation commented bellow for reference.");
+        unimplemented!(
+            "Not implemented yet, x86_64 implementation commented bellow for reference."
+        );
         // match self {
         //     Self::PushRegister {
         //         instruction_offset,
@@ -149,7 +148,7 @@ impl UnwindCode {
                 } else {
                     4
                 }
-            },
+            }
             _ => 1,
         }
     }
@@ -248,12 +247,16 @@ pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<crate::machinst::
     for &(instruction_offset, ref inst) in insts {
         let instruction_offset = ensure_unwind_offset(instruction_offset)?;
         match inst {
-            &UnwindInst::PushFrameRegs { .. } => unimplemented!("Cannot PushFramRegs, has not been implemented yet."),
+            &UnwindInst::PushFrameRegs { .. } => {
+                unimplemented!("Cannot PushFramRegs, has not been implemented yet.")
+            }
             &UnwindInst::DefineNewFrame {
                 offset_downward_to_clobbers,
                 ..
             } => unimplemented!("Cannot DefineNewFrame, has not been implemented yet."),
-            &UnwindInst::StackAlloc { size } => unimplemented!("Cannot StackAlloc, has not been implemented yet."),
+            &UnwindInst::StackAlloc { size } => {
+                unimplemented!("Cannot StackAlloc, has not been implemented yet.")
+            }
             &UnwindInst::SaveReg {
                 clobber_offset,
                 reg,
@@ -272,7 +275,7 @@ pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<crate::machinst::
                 //         stack_offset: clobber_offset,
                 //     });
                 // }
-                _ => unimplemented!("Cannot SaveReg, has not been implemented yet.")
+                _ => unimplemented!("Cannot SaveReg, has not been implemented yet."),
             },
             &UnwindInst::Aarch64SetPointerAuth { .. } => {
                 unreachable!("no aarch64 on x64");

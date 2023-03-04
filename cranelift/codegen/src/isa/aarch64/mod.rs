@@ -156,13 +156,11 @@ impl TargetIsa for AArch64Backend {
                     )?,
                 ))
             }
-            UnwindInfoKind::Windows => {
-                Some(UnwindInfo::WindowsAarch64(
-                    crate::isa::unwind::winaarch64::create_unwind_info_from_insts::<
-                        self::inst::unwind::winaarch64::RegisterMapper
-                    >(&result.buffer.unwind_info[..])?,
-                ))
-            }
+            UnwindInfoKind::Windows => Some(UnwindInfo::WindowsAarch64(
+                crate::isa::unwind::winaarch64::create_unwind_info_from_insts::<
+                    self::inst::unwind::winaarch64::RegisterMapper,
+                >(&result.buffer.unwind_info[..])?,
+            )),
             _ => None,
         })
     }

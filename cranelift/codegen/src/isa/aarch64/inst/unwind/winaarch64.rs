@@ -8,7 +8,7 @@ impl crate::isa::unwind::winaarch64::RegisterMapper<Reg> for RegisterMapper {
             // Map Registers from RegClass -> MappedRegister
             //x64 example RegClass::Int => MappedRegister::Int(reg.to_real_reg().unwrap().hw_enc()),
             RegClass::Int => unimplemented!(""),
-            regalloc2::RegClass::Float => unimplemented!("")
+            regalloc2::RegClass::Float => unimplemented!(""),
         }
     }
 }
