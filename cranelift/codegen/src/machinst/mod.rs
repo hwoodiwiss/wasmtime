@@ -505,7 +505,7 @@ pub enum UnwindInfoKind {
     /// SystemV CIE/FDE unwind info.
     #[cfg(feature = "unwind")]
     SystemV,
-    /// Windows X64 Unwind info
+    /// Windows X64/ARM64 Unwind info
     #[cfg(feature = "unwind")]
     Windows,
 }

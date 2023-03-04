@@ -5,8 +5,7 @@ use crate::ir::condcodes::IntCC;
 use crate::ir::{Function, Type};
 use crate::isa::aarch64::settings as aarch64_settings;
 #[cfg(feature = "unwind")]
-use crate::isa::unwind::systemv;
-use crate::isa::unwind::winaarch64;
+use crate::isa::unwind::{systemv, winaarch64};
 use crate::isa::{Builder as IsaBuilder, TargetIsa};
 use crate::machinst::{
     compile, CompiledCode, CompiledCodeStencil, MachTextSectionBuilder, Reg, SigSet,
@@ -158,14 +157,11 @@ impl TargetIsa for AArch64Backend {
                 ))
             }
             UnwindInfoKind::Windows => {
-                let mapper = self::inst::unwind::winaarch64::RegisterMapper;
-                Some(UnwindInfo::Aarch64(
-                crate::isa::unwind::winaarch64::create_unwind_info_from_insts(
-                    &result.buffer.unwind_info[..],
-                    result.buffer.data().len(),
-                    &mapper,
-                )?,
-            ))
+                Some(UnwindInfo::WindowsAarch64(
+                    crate::isa::unwind::winaarch64::create_unwind_info_from_insts::<
+                        self::inst::unwind::winaarch64::RegisterMapper
+                    >(&result.buffer.unwind_info[..])?,
+                ))
             }
             _ => None,
         })

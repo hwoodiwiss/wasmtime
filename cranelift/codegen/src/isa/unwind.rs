@@ -21,6 +21,9 @@ pub mod winx64;
 pub enum UnwindInfo {
     /// Windows x64 ABI unwind information.
     #[cfg(feature = "unwind")]
+    WindowsAarch64(winaarch64::UnwindInfo),
+    /// Windows x64 ABI unwind information.
+    #[cfg(feature = "unwind")]
     WindowsX64(winx64::UnwindInfo),
     /// System V ABI unwind information.
     #[cfg(feature = "unwind")]
