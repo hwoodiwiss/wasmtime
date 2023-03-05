@@ -1,16 +1,16 @@
-//! Module for Windows AARCH64 ABI unwind registry.
+//! Module for Windows x64/ARM64 ABI unwind registry.
 
 use anyhow::{bail, Result};
 use std::mem;
 use windows_sys::Win32::System::Diagnostics::Debug::*;
 
-/// Represents a registry of function unwind information for Windows AARCH64 ABI.
+/// Represents a registry of function unwind information for Windows x64 and ARM64 ABIs.
 pub struct UnwindRegistration {
     functions: usize,
 }
 
 impl UnwindRegistration {
-    pub const SECTION_NAME: &str = ".xdata";
+    pub const SECTION_NAME: &str = ".pdata";
 
     pub unsafe fn new(
         base_address: *const u8,
