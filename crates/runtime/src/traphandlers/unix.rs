@@ -14,6 +14,9 @@ static mut PREV_SIGILL: MaybeUninit<libc::sigaction> = MaybeUninit::uninit();
 static mut PREV_SIGFPE: MaybeUninit<libc::sigaction> = MaybeUninit::uninit();
 
 pub unsafe fn platform_init() {
+    if cfg!(miri) {
+        return;
+    }
     let register = |slot: &mut MaybeUninit<libc::sigaction>, signal: i32| {
         let mut handler: libc::sigaction = mem::zeroed();
         // The flags here are relatively careful, and they are...
@@ -101,7 +104,11 @@ unsafe extern "C" fn trap_handler(
         if jmp_buf as usize == 1 {
             return true;
         }
-        info.set_jit_trap(pc, fp);
+        let faulting_addr = match signum {
+            libc::SIGSEGV | libc::SIGBUS => Some((*siginfo).si_addr() as usize),
+            _ => None,
+        };
+        info.set_jit_trap(pc, fp, faulting_addr);
         // On macOS this is a bit special, unfortunately. If we were to
         // `siglongjmp` out of the signal handler that notably does
         // *not* reset the sigaltstack state of our signal handler. This
@@ -166,6 +173,21 @@ unsafe extern "C" fn trap_handler(
     }
 }
 
+// FIXME(rust-lang/libc#3312) the currenty definition of `ucontext_t` in the
+// `libc` crate is incorrect on aarch64-apple-drawin so it's defined here with a
+// more accurate definition. When that PR and/or issue is resolved then this
+// should no longer be necessary.
+#[repr(C)]
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+struct ucontext_t {
+    uc_onstack: libc::c_int,
+    uc_sigmask: libc::sigset_t,
+    uc_stack: libc::stack_t,
+    uc_link: *mut libc::ucontext_t,
+    uc_mcsize: usize,
+    uc_mcontext: libc::mcontext_t,
+}
+
 unsafe fn get_pc_and_fp(cx: *mut libc::c_void, _signum: libc::c_int) -> (*const u8, usize) {
     cfg_if::cfg_if! {
         if #[cfg(all(target_os = "linux", target_arch = "x86_64"))] {
@@ -207,7 +229,7 @@ unsafe fn get_pc_and_fp(cx: *mut libc::c_void, _signum: libc::c_int) -> (*const 
                 (*cx.uc_mcontext).__ss.__rbp as usize,
             )
         } else if #[cfg(all(target_os = "macos", target_arch = "aarch64"))] {
-            let cx = &*(cx as *const libc::ucontext_t);
+            let cx = &*(cx as *const ucontext_t);
             (
                 (*cx.uc_mcontext).__ss.__pc as *const u8,
                 (*cx.uc_mcontext).__ss.__fp as usize,
@@ -244,7 +266,7 @@ unsafe fn get_pc_and_fp(cx: *mut libc::c_void, _signum: libc::c_int) -> (*const 
 unsafe fn set_pc(cx: *mut libc::c_void, pc: usize, arg1: usize) {
     cfg_if::cfg_if! {
         if #[cfg(not(target_os = "macos"))] {
-            drop((cx, pc, arg1));
+            let _ = (cx, pc, arg1);
             unreachable!(); // not used on these platforms
         } else if #[cfg(target_arch = "x86_64")] {
             let cx = &mut *(cx as *mut libc::ucontext_t);
@@ -263,7 +285,7 @@ unsafe fn set_pc(cx: *mut libc::c_void, pc: usize, arg1: usize) {
                 (*cx.uc_mcontext).__ss.__rsp -= 8;
             }
         } else if #[cfg(target_arch = "aarch64")] {
-            let cx = &mut *(cx as *mut libc::ucontext_t);
+            let cx = &mut *(cx as *mut ucontext_t);
             (*cx.uc_mcontext).__ss.__pc = pc as u64;
             (*cx.uc_mcontext).__ss.__x[0] = arg1 as u64;
         } else {
@@ -308,6 +330,10 @@ pub fn lazy_per_thread_init() {
     });
 
     unsafe fn allocate_sigaltstack() -> Option<Stack> {
+        if cfg!(miri) {
+            return None;
+        }
+
         // Check to see if the existing sigaltstack, if it exists, is big
         // enough. If so we don't need to allocate our own.
         let mut old_stack = mem::zeroed();

@@ -34,7 +34,7 @@
 //!     let engine = Engine::default();
 //!     let wat = r#"
 //!         (module
-//!             (import "host" "hello" (func $host_hello (param i32)))
+//!             (import "host" "host_func" (func $host_hello (param i32)))
 //!
 //!             (func (export "hello")
 //!                 i32.const 3
@@ -47,7 +47,7 @@
 //!     // `Store` has a type parameter to store host-specific data, which in
 //!     // this case we're using `4` for.
 //!     let mut store = Store::new(&engine, 4);
-//!     let host_hello = Func::wrap(&mut store, |caller: Caller<'_, u32>, param: i32| {
+//!     let host_func = Func::wrap(&mut store, |caller: Caller<'_, u32>, param: i32| {
 //!         println!("Got {} from WebAssembly", param);
 //!         println!("my host state is: {}", caller.data());
 //!     });
@@ -55,7 +55,7 @@
 //!     // Instantiation of a module requires specifying its imports and then
 //!     // afterwards we can fetch exports by name, as well as asserting the
 //!     // type signature of the function with `get_typed_func`.
-//!     let instance = Instance::new(&mut store, &module, &[host_hello.into()])?;
+//!     let instance = Instance::new(&mut store, &module, &[host_func.into()])?;
 //!     let hello = instance.get_typed_func::<(), ()>(&mut store, "hello")?;
 //!
 //!     // And finally we can call the wasm!
@@ -146,7 +146,7 @@
 //!     let engine = Engine::default();
 //!     let wat = r#"
 //!         (module
-//!             (import "host" "hello" (func $host_hello (param i32)))
+//!             (import "host" "host_func" (func $host_hello (param i32)))
 //!
 //!             (func (export "hello")
 //!                 i32.const 3
@@ -157,7 +157,7 @@
 //!
 //!     // Create a `Linker` and define our host function in it:
 //!     let mut linker = Linker::new(&engine);
-//!     linker.func_wrap("host", "hello", |caller: Caller<'_, u32>, param: i32| {
+//!     linker.func_wrap("host", "host_func", |caller: Caller<'_, u32>, param: i32| {
 //!         println!("Got {} from WebAssembly", param);
 //!         println!("my host state is: {}", caller.data());
 //!     })?;
@@ -390,8 +390,12 @@
 #[macro_use]
 mod func;
 
+#[cfg(any(feature = "cranelift", feature = "winch"))]
+mod compiler;
+
 mod code;
 mod config;
+mod coredump;
 mod engine;
 mod externals;
 mod instance;
@@ -399,7 +403,9 @@ mod limits;
 mod linker;
 mod memory;
 mod module;
+mod profiling;
 mod r#ref;
+mod resources;
 mod signatures;
 mod store;
 mod trampoline;
@@ -408,6 +414,7 @@ mod types;
 mod values;
 
 pub use crate::config::*;
+pub use crate::coredump::*;
 pub use crate::engine::*;
 pub use crate::externals::*;
 pub use crate::func::*;
@@ -416,10 +423,14 @@ pub use crate::limits::*;
 pub use crate::linker::*;
 pub use crate::memory::*;
 pub use crate::module::Module;
+pub use crate::profiling::GuestProfiler;
 pub use crate::r#ref::ExternRef;
+pub use crate::resources::*;
 #[cfg(feature = "async")]
 pub use crate::store::CallHookHandler;
-pub use crate::store::{AsContext, AsContextMut, CallHook, Store, StoreContext, StoreContextMut};
+pub use crate::store::{
+    AsContext, AsContextMut, CallHook, Store, StoreContext, StoreContextMut, UpdateDeadline,
+};
 pub use crate::trap::*;
 pub use crate::types::*;
 pub use crate::values::*;

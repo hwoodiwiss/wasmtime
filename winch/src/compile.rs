@@ -4,8 +4,9 @@ use cranelift_codegen::settings;
 use std::{fs, path::PathBuf, str::FromStr};
 use target_lexicon::Triple;
 use wasmtime_environ::{
-    wasmparser::{types::Types, Parser as WasmParser, Validator},
-    DefinedFuncIndex, FunctionBodyData, Module, ModuleEnvironment, Tunables,
+    wasmparser::{Parser as WasmParser, Validator},
+    DefinedFuncIndex, FunctionBodyData, ModuleEnvironment, ModuleTranslation, Tunables,
+    TypeConvert,
 };
 use winch_codegen::{lookup, TargetIsa};
 use winch_filetests::disasm::disasm;
@@ -27,7 +28,7 @@ pub fn run(opt: &Options) -> Result<()> {
     let triple = Triple::from_str(&opt.target)?;
     let shared_flags = settings::Flags::new(settings::builder());
     let isa_builder = lookup(triple)?;
-    let isa = isa_builder.build(shared_flags)?;
+    let isa = isa_builder.finish(shared_flags)?;
     let mut validator = Validator::new();
     let parser = WasmParser::new(0);
     let mut types = Default::default();
@@ -36,32 +37,28 @@ pub fn run(opt: &Options) -> Result<()> {
         .translate(parser, &bytes)
         .context("Failed to translate WebAssembly module")?;
     let _ = types.finish();
-
     let body_inputs = std::mem::take(&mut translation.function_body_inputs);
-    let module = &translation.module;
-    let types = translation.get_types();
 
     body_inputs
         .into_iter()
-        .try_for_each(|func| compile(&*isa, module, types, func))?;
+        .try_for_each(|func| compile(&isa, &translation, func))?;
 
     Ok(())
 }
 
 fn compile(
-    isa: &dyn TargetIsa,
-    module: &Module,
-    types: &Types,
+    isa: &Box<dyn TargetIsa>,
+    translation: &ModuleTranslation,
     f: (DefinedFuncIndex, FunctionBodyData<'_>),
 ) -> Result<()> {
-    let index = module.func_index(f.0);
-    let sig = types
-        .function_at(index.as_u32())
-        .expect(&format!("function type at index {:?}", index.as_u32()));
+    let index = translation.module.func_index(f.0);
+    let types = &translation.get_types();
+    let sig = types[types.function_at(index.as_u32())].unwrap_func();
+    let sig = translation.module.convert_func_type(sig);
     let FunctionBodyData { body, validator } = f.1;
-    let validator = validator.into_validator(Default::default());
+    let mut validator = validator.into_validator(Default::default());
     let buffer = isa
-        .compile_function(&sig, &body, validator)
+        .compile_function(&sig, &body, &translation, &mut validator)
         .expect("Couldn't compile function");
 
     println!("Disassembly for function: {}", index.as_u32());

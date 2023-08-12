@@ -36,6 +36,7 @@ pub enum wasmtime_profiling_strategy_t {
     WASMTIME_PROFILING_STRATEGY_NONE,
     WASMTIME_PROFILING_STRATEGY_JITDUMP,
     WASMTIME_PROFILING_STRATEGY_VTUNE,
+    WASMTIME_PROFILING_STRATEGY_PERFMAP,
 }
 
 #[no_mangle]
@@ -78,6 +79,19 @@ pub extern "C" fn wasmtime_config_wasm_reference_types_set(c: &mut wasm_config_t
 #[no_mangle]
 pub extern "C" fn wasmtime_config_wasm_simd_set(c: &mut wasm_config_t, enable: bool) {
     c.config.wasm_simd(enable);
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_config_wasm_relaxed_simd_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.wasm_relaxed_simd(enable);
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_config_wasm_relaxed_simd_deterministic_set(
+    c: &mut wasm_config_t,
+    enable: bool,
+) {
+    c.config.relaxed_simd_deterministic(enable);
 }
 
 #[no_mangle]
@@ -157,6 +171,7 @@ pub extern "C" fn wasmtime_config_profiler_set(
         WASMTIME_PROFILING_STRATEGY_NONE => ProfilingStrategy::None,
         WASMTIME_PROFILING_STRATEGY_JITDUMP => ProfilingStrategy::JitDump,
         WASMTIME_PROFILING_STRATEGY_VTUNE => ProfilingStrategy::VTune,
+        WASMTIME_PROFILING_STRATEGY_PERFMAP => ProfilingStrategy::PerfMap,
     });
 }
 
@@ -177,6 +192,11 @@ pub unsafe extern "C" fn wasmtime_config_cache_config_load(
         },
         |_cfg| {},
     )
+}
+
+#[no_mangle]
+pub extern "C" fn wasmtime_config_static_memory_forced_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.static_memory_forced(enable);
 }
 
 #[no_mangle]

@@ -9,17 +9,17 @@
 )
 ;;    0:	 55                   	push	rbp
 ;;    1:	 4889e5               	mov	rbp, rsp
-;;    4:	 b905000000           	mov	ecx, 5
-;;    9:	 b807000000           	mov	eax, 7
-;;    e:	 83f900               	cmp	ecx, 0
-;;   11:	 0f8502000000         	jne	0x19
-;;   17:	 0f0b                 	ud2	
-;;   19:	 83f9ff               	cmp	ecx, -1
-;;   1c:	 0f850a000000         	jne	0x2c
-;;   22:	 b800000000           	mov	eax, 0
-;;   27:	 e903000000           	jmp	0x2f
-;;   2c:	 99                   	cdq	
-;;   2d:	 f7f9                 	idiv	ecx
-;;   2f:	 4889d0               	mov	rax, rdx
-;;   32:	 5d                   	pop	rbp
-;;   33:	 c3                   	ret	
+;;    4:	 4883ec08             	sub	rsp, 8
+;;    8:	 4c893424             	mov	qword ptr [rsp], r14
+;;    c:	 b905000000           	mov	ecx, 5
+;;   11:	 b807000000           	mov	eax, 7
+;;   16:	 99                   	cdq	
+;;   17:	 83f9ff               	cmp	ecx, -1
+;;   1a:	 0f850a000000         	jne	0x2a
+;;   20:	 ba00000000           	mov	edx, 0
+;;   25:	 e902000000           	jmp	0x2c
+;;   2a:	 f7f9                 	idiv	ecx
+;;   2c:	 4889d0               	mov	rax, rdx
+;;   2f:	 4883c408             	add	rsp, 8
+;;   33:	 5d                   	pop	rbp
+;;   34:	 c3                   	ret	

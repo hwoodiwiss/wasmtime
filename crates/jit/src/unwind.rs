@@ -1,7 +1,10 @@
 cfg_if::cfg_if! {
     if #[cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))] {
-        mod windows;
-        pub use self::windows::*;
+        mod winx64;
+        pub use self::winx64::*;
+    } else if #[cfg(miri)] {
+        mod miri;
+        pub use self::miri::*;
     } else if #[cfg(unix)] {
         mod systemv;
         pub use self::systemv::*;

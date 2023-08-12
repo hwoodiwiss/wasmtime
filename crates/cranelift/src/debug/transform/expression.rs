@@ -1,8 +1,9 @@
 use super::address_transform::AddressTransform;
 use crate::debug::ModuleMemoryOffset;
 use anyhow::{Context, Error, Result};
-use cranelift_codegen::ir::{LabelValueLoc, StackSlots, ValueLabel};
+use cranelift_codegen::ir::{StackSlots, ValueLabel};
 use cranelift_codegen::isa::TargetIsa;
+use cranelift_codegen::LabelValueLoc;
 use cranelift_codegen::ValueLabelsRanges;
 use cranelift_wasm::get_vmctx_value_label;
 use gimli::{self, write, Expression, Operation, Reader, ReaderOffset, X86_64};
@@ -782,7 +783,7 @@ mod tests {
         compile_expression, AddressTransform, CompiledExpression, CompiledExpressionPart,
         FunctionFrameInfo, JumpTargetMarker, ValueLabel, ValueLabelsRanges,
     };
-    use crate::CompiledFunction;
+    use crate::CompiledFunctionMetadata;
     use gimli::{self, constants, Encoding, EndianSlice, Expression, RunTimeEndian};
     use wasmtime_environ::FilePos;
 
@@ -1112,13 +1113,14 @@ mod tests {
     }
 
     fn create_mock_address_transform() -> AddressTransform {
-        use crate::FunctionAddressMap;
         use cranelift_entity::PrimaryMap;
+        use wasmtime_cranelift_shared::FunctionAddressMap;
         use wasmtime_environ::InstructionAddressMap;
         use wasmtime_environ::WasmFileInfo;
+
         let mut module_map = PrimaryMap::new();
         let code_section_offset: u32 = 100;
-        let func = CompiledFunction {
+        let func = CompiledFunctionMetadata {
             address_map: FunctionAddressMap {
                 instructions: vec![
                     InstructionAddressMap {
@@ -1157,8 +1159,7 @@ mod tests {
     }
 
     fn create_mock_value_ranges() -> (ValueLabelsRanges, (ValueLabel, ValueLabel, ValueLabel)) {
-        use cranelift_codegen::ir::LabelValueLoc;
-        use cranelift_codegen::ValueLocRange;
+        use cranelift_codegen::{LabelValueLoc, ValueLocRange};
         use cranelift_entity::EntityRef;
         use std::collections::HashMap;
         let mut value_ranges = HashMap::new();

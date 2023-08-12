@@ -1,4 +1,4 @@
-use crate::types::TypeInfo;
+use crate::{types::TypeInfo, Ownership};
 use heck::*;
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -15,7 +15,18 @@ pub trait RustGenerator<'a> {
 
     fn push_str(&mut self, s: &str);
     fn info(&self, ty: TypeId) -> TypeInfo;
-    fn current_interface(&self) -> Option<InterfaceId>;
+    fn path_to_interface(&self, interface: InterfaceId) -> Option<String>;
+
+    /// This determines whether we generate owning types or (where appropriate)
+    /// borrowing types.
+    ///
+    /// For example, when generating a type which is only used as a parameter to
+    /// a guest-exported function, there is no need for it to own its fields.
+    /// However, constructing deeply-nested borrows (e.g. `&[&[&[&str]]]]` for
+    /// `list<list<list<string>>>`) can be very awkward, so by default we
+    /// generate owning types and use only shallow borrowing at the top level
+    /// inside function signatures.
+    fn ownership(&self) -> Ownership;
 
     fn print_ty(&mut self, ty: &Type, mode: TypeMode) {
         match ty {
@@ -58,25 +69,29 @@ pub trait RustGenerator<'a> {
         let lt = self.lifetime_for(&info, mode);
         let ty = &self.resolve().types[id];
         if ty.name.is_some() {
+            // If this type has a list internally, no lifetime is being printed,
+            // but we're in a borrowed mode, then that means we're in a borrowed
+            // context and don't want ownership of the type but we're using an
+            // owned type definition. Inject a `&` in front to indicate that, at
+            // the API level, ownership isn't required.
+            if info.has_list && lt.is_none() {
+                if let TypeMode::AllBorrowed(lt) = mode {
+                    self.push_str("&");
+                    if lt != "'_" {
+                        self.push_str(lt);
+                        self.push_str(" ");
+                    }
+                }
+            }
             let name = if lt.is_some() {
                 self.param_name(id)
             } else {
                 self.result_name(id)
             };
             if let TypeOwner::Interface(id) = ty.owner {
-                if let Some(name) = &self.resolve().interfaces[id].name {
-                    match self.current_interface() {
-                        Some(cur) if cur == id => {}
-                        Some(_other) => {
-                            self.push_str("super::");
-                            self.push_str(&name.to_snake_case());
-                            self.push_str("::");
-                        }
-                        None => {
-                            self.push_str(&name.to_snake_case());
-                            self.push_str("::");
-                        }
-                    }
+                if let Some(path) = self.path_to_interface(id) {
+                    self.push_str(&path);
+                    self.push_str("::");
                 }
             }
             self.push_str(&name);
@@ -102,7 +117,9 @@ pub trait RustGenerator<'a> {
                     | TypeDefKind::Flags(_)
                     | TypeDefKind::Enum(_)
                     | TypeDefKind::Tuple(_)
-                    | TypeDefKind::Union(_) => true,
+                    | TypeDefKind::Union(_)
+                    | TypeDefKind::Handle(_)
+                    | TypeDefKind::Resource => true,
                     TypeDefKind::Type(Type::Id(t)) => {
                         needs_generics(resolve, &resolve.types[*t].kind)
                     }
@@ -168,12 +185,20 @@ pub trait RustGenerator<'a> {
                 self.push_str(">");
             }
 
+            TypeDefKind::Handle(_) => todo!("#6722"),
+            TypeDefKind::Resource => todo!("#6722"),
+
             TypeDefKind::Type(t) => self.print_ty(t, mode),
             TypeDefKind::Unknown => unreachable!(),
         }
     }
 
     fn print_list(&mut self, ty: &Type, mode: TypeMode) {
+        let next_mode = if matches!(self.ownership(), Ownership::Owning) {
+            TypeMode::Owned
+        } else {
+            mode
+        };
         match mode {
             TypeMode::AllBorrowed(lt) => {
                 self.push_str("&");
@@ -182,12 +207,12 @@ pub trait RustGenerator<'a> {
                     self.push_str(" ");
                 }
                 self.push_str("[");
-                self.print_ty(ty, mode);
+                self.print_ty(ty, next_mode);
                 self.push_str("]");
             }
             TypeMode::Owned => {
                 self.push_str("Vec<");
-                self.print_ty(ty, mode);
+                self.print_ty(ty, next_mode);
                 self.push_str(">");
             }
         }
@@ -207,14 +232,22 @@ pub trait RustGenerator<'a> {
 
     fn modes_of(&self, ty: TypeId) -> Vec<(String, TypeMode)> {
         let info = self.info(ty);
+        if !info.owned && !info.borrowed {
+            return Vec::new();
+        }
         let mut result = Vec::new();
-        if info.borrowed {
+        let first_mode =
+            if info.owned || !info.borrowed || matches!(self.ownership(), Ownership::Owning) {
+                TypeMode::Owned
+            } else {
+                assert!(!self.uses_two_names(&info));
+                TypeMode::AllBorrowed("'a")
+            };
+        result.push((self.result_name(ty), first_mode));
+        if self.uses_two_names(&info) {
             result.push((self.param_name(ty), TypeMode::AllBorrowed("'a")));
         }
-        if info.owned && (!info.borrowed || self.uses_two_names(&info)) {
-            result.push((self.result_name(ty), TypeMode::Owned));
-        }
-        return result;
+        result
     }
 
     /// Writes the camel-cased 'name' of the passed type to `out`, as used to name union variants.
@@ -264,6 +297,8 @@ pub trait RustGenerator<'a> {
                         TypeDefKind::Variant(_) => out.push_str("Variant"),
                         TypeDefKind::Enum(_) => out.push_str("Enum"),
                         TypeDefKind::Union(_) => out.push_str("Union"),
+                        TypeDefKind::Handle(_) => todo!("#6722"),
+                        TypeDefKind::Resource => todo!("#6722"),
                         TypeDefKind::Unknown => unreachable!(),
                     },
                 }
@@ -357,13 +392,38 @@ pub trait RustGenerator<'a> {
     }
 
     fn uses_two_names(&self, info: &TypeInfo) -> bool {
-        info.has_list && info.borrowed && info.owned
+        info.has_list
+            && info.borrowed
+            && info.owned
+            && matches!(
+                self.ownership(),
+                Ownership::Borrowing {
+                    duplicate_if_necessary: true
+                }
+            )
     }
 
     fn lifetime_for(&self, info: &TypeInfo, mode: TypeMode) -> Option<&'static str> {
-        match mode {
-            TypeMode::AllBorrowed(s) if info.has_list => Some(s),
-            _ => None,
+        if matches!(self.ownership(), Ownership::Owning) {
+            return None;
+        }
+        let lt = match mode {
+            TypeMode::AllBorrowed(s) => s,
+            _ => return None,
+        };
+        // No lifetimes needed unless this has a list.
+        if !info.has_list {
+            return None;
+        }
+        // If two names are used then this type will have an owned and a
+        // borrowed copy and the borrowed copy is being used, so it needs a
+        // lifetime. Otherwise if it's only borrowed and not owned then this can
+        // also use a lifetime since it's not needed in two contexts and only
+        // the borrowed version of the structure was generated.
+        if self.uses_two_names(info) || (info.borrowed && !info.owned) {
+            Some(lt)
+        } else {
+            None
         }
     }
 }

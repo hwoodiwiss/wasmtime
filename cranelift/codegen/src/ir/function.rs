@@ -11,7 +11,6 @@ use crate::ir::{
     StackSlots, Table, TableData, Type,
 };
 use crate::isa::CallConv;
-use crate::value_label::ValueLabelsRanges;
 use crate::write::write_function;
 use crate::HashMap;
 #[cfg(feature = "enable-serde")]
@@ -31,7 +30,7 @@ use super::{RelSourceLoc, SourceLoc, UserExternalName};
 
 /// A version marker used to ensure that serialized clif ir is never deserialized with a
 /// different version of Cranelift.
-#[derive(Copy, Clone, Debug, PartialEq, Hash)]
+#[derive(Default, Copy, Clone, Debug, PartialEq, Hash)]
 pub struct VersionMarker;
 
 #[cfg(feature = "enable-serde")]
@@ -64,7 +63,7 @@ impl<'de> Deserialize<'de> for VersionMarker {
 
 /// Function parameters used when creating this function, and that will become applied after
 /// compilation to materialize the final `CompiledCode`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct FunctionParameters {
     /// The first `SourceLoc` appearing in the function, serving as a base for every relative
@@ -230,7 +229,7 @@ impl FunctionStencil {
         self.global_values.push(data)
     }
 
-    /// Find the global dyn_scale value associated with given DynamicType
+    /// Find the global dyn_scale value associated with given DynamicType.
     pub fn get_dyn_scale(&self, ty: DynamicType) -> GlobalValue {
         self.dfg.dynamic_types.get(ty).unwrap().dynamic_scale
     }
@@ -351,7 +350,7 @@ impl FunctionStencil {
 
 /// Functions can be cloned, but it is not a very fast operation.
 /// The clone will have all the same entity numbers as the original.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct Function {
     /// Name of this function.
@@ -417,15 +416,7 @@ impl Function {
 
     /// Return an object that can display this function with correct ISA-specific annotations.
     pub fn display(&self) -> DisplayFunction<'_> {
-        DisplayFunction(self, Default::default())
-    }
-
-    /// Return an object that can display this function with correct ISA-specific annotations.
-    pub fn display_with<'a>(
-        &'a self,
-        annotations: DisplayFunctionAnnotations<'a>,
-    ) -> DisplayFunction<'a> {
-        DisplayFunction(self, annotations)
+        DisplayFunction(self)
     }
 
     /// Sets an absolute source location for the given instruction.
@@ -456,15 +447,8 @@ impl Function {
     }
 }
 
-/// Additional annotations for function display.
-#[derive(Default)]
-pub struct DisplayFunctionAnnotations<'a> {
-    /// Enable value labels annotations.
-    pub value_ranges: Option<&'a ValueLabelsRanges>,
-}
-
-/// Wrapper type capable of displaying a `Function` with correct ISA annotations.
-pub struct DisplayFunction<'a>(&'a Function, DisplayFunctionAnnotations<'a>);
+/// Wrapper type capable of displaying a `Function`.
+pub struct DisplayFunction<'a>(&'a Function);
 
 impl<'a> fmt::Display for DisplayFunction<'a> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {

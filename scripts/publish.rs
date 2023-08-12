@@ -25,6 +25,7 @@ const CRATES_TO_PUBLISH: &[&str] = &[
     "cranelift-codegen-shared",
     "cranelift-codegen-meta",
     "cranelift-egraph",
+    "cranelift-control",
     "cranelift-codegen",
     "cranelift-reader",
     "cranelift-serde",
@@ -41,10 +42,10 @@ const CRATES_TO_PUBLISH: &[&str] = &[
     "wiggle-generate",
     "wiggle-macro",
     // winch
-    "winch-codegen",
     "winch",
     // wasmtime
     "wasmtime-asm-macros",
+    "wasmtime-versioned-export-macros",
     "wasmtime-component-util",
     "wasmtime-wit-bindgen",
     "wasmtime-component-macro",
@@ -52,9 +53,11 @@ const CRATES_TO_PUBLISH: &[&str] = &[
     "wasmtime-fiber",
     "wasmtime-environ",
     "wasmtime-runtime",
+    "wasmtime-cranelift-shared",
     "wasmtime-cranelift",
     "wasmtime-jit",
     "wasmtime-cache",
+    "winch-codegen",
     "wasmtime-winch",
     "wasmtime",
     // wasi-common/wiggle
@@ -64,11 +67,12 @@ const CRATES_TO_PUBLISH: &[&str] = &[
     "wasi-tokio",
     // other misc wasmtime crates
     "wasmtime-wasi",
-    "wasmtime-wasi-crypto",
+    "wasmtime-wasi-http",
     "wasmtime-wasi-nn",
     "wasmtime-wasi-threads",
     "wasmtime-wast",
     "wasmtime-cli-flags",
+    "wasmtime-explorer",
     "wasmtime-cli",
 ];
 
@@ -79,13 +83,11 @@ const CRATES_TO_PUBLISH: &[&str] = &[
 const PUBLIC_CRATES: &[&str] = &[
     // just here to appease the script because these are submodules of this
     // repository.
-    "wasi-crypto",
     "witx",
     // these are actually public crates which we cannot break the API of in
     // patch releases.
     "wasmtime",
     "wasmtime-wasi",
-    "wasmtime-wasi-crypto",
     "wasmtime-wasi-nn",
     "wasmtime-wasi-threads",
     "wasmtime-cli",
@@ -96,6 +98,7 @@ const PUBLIC_CRATES: &[&str] = &[
     "cranelift-codegen-shared",
     "cranelift-codegen-meta",
     "cranelift-egraph",
+    "cranelift-control",
     "cranelift-codegen",
     "cranelift-reader",
     "cranelift-serde",
@@ -249,7 +252,7 @@ fn read_crate(ws: Option<&Workspace>, manifest: &Path) -> Crate {
     }
     let name = name.unwrap();
     let version = version.unwrap();
-    if ["witx", "witx-cli", "wasi-crypto"].contains(&&name[..]) {
+    if ["witx", "witx-cli"].contains(&&name[..]) {
         publish = false;
     }
     Crate {
@@ -494,10 +497,6 @@ fn verify(crates: &[Crate]) {
         .find(|c| c.name == "witx" && c.manifest.iter().any(|p| p == "wasi-common"))
         .unwrap();
     verify_and_vendor(&witx);
-
-    // Vendor wasi-crypto which is also a path dependency
-    let wasi_crypto = crates.iter().find(|c| c.name == "wasi-crypto").unwrap();
-    verify_and_vendor(&wasi_crypto);
 
     for krate in crates {
         if !krate.publish {

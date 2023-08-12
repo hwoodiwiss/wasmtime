@@ -1,18 +1,19 @@
 use crate::memory::MemoryCreator;
 use crate::trampoline::MemoryCreatorProxy;
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-#[cfg(feature = "cache")]
+#[cfg(any(feature = "cache", feature = "cranelift", feature = "winch"))]
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use target_lexicon::Architecture;
 use wasmparser::WasmFeatures;
 #[cfg(feature = "cache")]
 use wasmtime_cache::CacheConfig;
 use wasmtime_environ::Tunables;
-use wasmtime_jit::{JitDumpAgent, NullProfilerAgent, ProfilingAgent, VTuneAgent};
+use wasmtime_jit::profiling::{self, ProfilingAgent};
 use wasmtime_runtime::{InstanceAllocator, OnDemandInstanceAllocator, RuntimeMemoryCreator};
 
 pub use wasmtime_environ::CacheStore;
@@ -67,6 +68,16 @@ impl Default for ModuleVersionStrategy {
     }
 }
 
+impl std::hash::Hash for ModuleVersionStrategy {
+    fn hash<H: std::hash::Hasher>(&self, hasher: &mut H) {
+        match self {
+            Self::WasmtimeVersion => env!("CARGO_PKG_VERSION").hash(hasher),
+            Self::Custom(s) => s.hash(hasher),
+            Self::None => {}
+        };
+    }
+}
+
 /// Global configuration options used to create an [`Engine`](crate::Engine)
 /// and customize its behavior.
 ///
@@ -77,7 +88,7 @@ impl Default for ModuleVersionStrategy {
 /// a problematic config may cause `Engine::new` to fail.
 #[derive(Clone)]
 pub struct Config {
-    #[cfg(compiler)]
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
     compiler_config: CompilerConfig,
     profiling_strategy: ProfilingStrategy,
 
@@ -99,21 +110,24 @@ pub struct Config {
     pub(crate) memory_init_cow: bool,
     pub(crate) memory_guaranteed_dense_image_size: u64,
     pub(crate) force_memory_init_memfd: bool,
+    pub(crate) coredump_on_trap: bool,
+    pub(crate) macos_use_mach_ports: bool,
 }
 
 /// User-provided configuration for the compiler.
-#[cfg(compiler)]
+#[cfg(any(feature = "cranelift", feature = "winch"))]
 #[derive(Debug, Clone)]
 struct CompilerConfig {
     strategy: Strategy,
     target: Option<target_lexicon::Triple>,
     settings: HashMap<String, String>,
     flags: HashSet<String>,
-    #[cfg(compiler)]
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
     cache_store: Option<Arc<dyn CacheStore>>,
+    clif_dir: Option<std::path::PathBuf>,
 }
 
-#[cfg(compiler)]
+#[cfg(any(feature = "cranelift", feature = "winch"))]
 impl CompilerConfig {
     fn new(strategy: Strategy) -> Self {
         Self {
@@ -122,6 +136,7 @@ impl CompilerConfig {
             settings: HashMap::new(),
             flags: HashSet::new(),
             cache_store: None,
+            clif_dir: None,
         }
     }
 
@@ -145,7 +160,7 @@ impl CompilerConfig {
     }
 }
 
-#[cfg(compiler)]
+#[cfg(any(feature = "cranelift", feature = "winch"))]
 impl Default for CompilerConfig {
     fn default() -> Self {
         Self::new(Strategy::Auto)
@@ -158,7 +173,7 @@ impl Config {
     pub fn new() -> Self {
         let mut ret = Self {
             tunables: Tunables::default(),
-            #[cfg(compiler)]
+            #[cfg(any(feature = "cranelift", feature = "winch"))]
             compiler_config: CompilerConfig::default(),
             #[cfg(feature = "cache")]
             cache_config: CacheConfig::new_cache_disabled(),
@@ -182,12 +197,14 @@ impl Config {
             async_stack_size: 2 << 20,
             async_support: false,
             module_version: ModuleVersionStrategy::default(),
-            parallel_compilation: true,
+            parallel_compilation: !cfg!(miri),
             memory_init_cow: true,
             memory_guaranteed_dense_image_size: 16 << 20,
             force_memory_init_memfd: false,
+            coredump_on_trap: false,
+            macos_use_mach_ports: true,
         };
-        #[cfg(compiler)]
+        #[cfg(any(feature = "cranelift", feature = "winch"))]
         {
             ret.cranelift_debug_verifier(false);
             ret.cranelift_opt_level(OptLevel::Speed);
@@ -218,10 +235,9 @@ impl Config {
     /// # Errors
     ///
     /// This method will error if the given target triple is not supported.
-    #[cfg(compiler)]
-    #[cfg_attr(nightlydoc, doc(cfg(feature = "cranelift")))] // see build.rs
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
+    #[cfg_attr(nightlydoc, doc(cfg(any(feature = "cranelift", feature = "winch"))))]
     pub fn target(&mut self, target: &str) -> Result<&mut Self> {
-        use std::str::FromStr;
         self.compiler_config.target =
             Some(target_lexicon::Triple::from_str(target).map_err(|e| anyhow::anyhow!(e))?);
 
@@ -610,6 +626,23 @@ impl Config {
         self
     }
 
+    /// Configures whether the WebAssembly tail calls proposal will be enabled
+    /// for compilation or not.
+    ///
+    /// The [WebAssembly tail calls proposal] introduces the `return_call` and
+    /// `return_call_indirect` instructions. These instructions allow for Wasm
+    /// programs to implement some recursive algorithms with *O(1)* stack space
+    /// usage.
+    ///
+    /// This feature is disabled by default.
+    ///
+    /// [WebAssembly tail calls proposal]: https://github.com/WebAssembly/tail-call
+    pub fn wasm_tail_call(&mut self, enable: bool) -> &mut Self {
+        self.features.tail_call = enable;
+        self.tunables.tail_callable = enable;
+        self
+    }
+
     /// Configures whether the WebAssembly threads proposal will be enabled for
     /// compilation.
     ///
@@ -661,13 +694,28 @@ impl Config {
         self
     }
 
+    /// Configures whether the [WebAssembly function references proposal][proposal]
+    /// will be enabled for compilation.
+    ///
+    /// This feature gates non-nullable reference types, function reference
+    /// types, call_ref, ref.func, and non-nullable reference related instructions.
+    ///
+    /// Note that the function references proposal depends on the reference types proposal.
+    ///
+    /// This feature is `false` by default.
+    ///
+    /// [proposal]: https://github.com/WebAssembly/function-references
+    pub fn wasm_function_references(&mut self, enable: bool) -> &mut Self {
+        self.features.function_references = enable;
+        self
+    }
+
     /// Configures whether the WebAssembly SIMD proposal will be
     /// enabled for compilation.
     ///
     /// The [WebAssembly SIMD proposal][proposal]. This feature gates items such
     /// as the `v128` type and all of its operators being in a module. Note that
-    /// this does not enable the [relaxed simd proposal] as that is not
-    /// implemented in Wasmtime at this time.
+    /// this does not enable the [relaxed simd proposal].
     ///
     /// On x86_64 platforms note that enabling this feature requires SSE 4.2 and
     /// below to be available on the target platform. Compilation will fail if
@@ -679,6 +727,56 @@ impl Config {
     /// [relaxed simd proposal]: https://github.com/WebAssembly/relaxed-simd
     pub fn wasm_simd(&mut self, enable: bool) -> &mut Self {
         self.features.simd = enable;
+        self
+    }
+
+    /// Configures whether the WebAssembly Relaxed SIMD proposal will be
+    /// enabled for compilation.
+    ///
+    /// The [WebAssembly Relaxed SIMD proposal][proposal] is not, at the time of
+    /// this writing, at stage 4. The relaxed SIMD proposal adds new
+    /// instructions to WebAssembly which, for some specific inputs, are allowed
+    /// to produce different results on different hosts. More-or-less this
+    /// proposal enables exposing platform-specific semantics of SIMD
+    /// instructions in a controlled fashion to a WebAssembly program. From an
+    /// embedder's perspective this means that WebAssembly programs may execute
+    /// differently depending on whether the host is x86_64 or AArch64, for
+    /// example.
+    ///
+    /// By default Wasmtime lowers relaxed SIMD instructions to the fastest
+    /// lowering for the platform it's running on. This means that, by default,
+    /// some relaxed SIMD instructions may have different results for the same
+    /// inputs across x86_64 and AArch64. This behavior can be disabled through
+    /// the [`Config::relaxed_simd_deterministic`] option which will force
+    /// deterministic behavior across all platforms, as classified by the
+    /// specification, at the cost of performance.
+    ///
+    /// This is `false` by default.
+    ///
+    /// [proposal]: https://github.com/webassembly/relaxed-simd
+    pub fn wasm_relaxed_simd(&mut self, enable: bool) -> &mut Self {
+        self.features.relaxed_simd = enable;
+        self
+    }
+
+    /// This option can be used to control the behavior of the [relaxed SIMD
+    /// proposal's][proposal] instructions.
+    ///
+    /// The relaxed SIMD proposal introduces instructions that are allowed to
+    /// have different behavior on different architectures, primarily to afford
+    /// an efficient implementation on all architectures. This means, however,
+    /// that the same module may execute differently on one host than another,
+    /// which typically is not otherwise the case. This option is provided to
+    /// force Wasmtime to generate deterministic code for all relaxed simd
+    /// instructions, at the cost of performance, for all architectures. When
+    /// this option is enabled then the deterministic behavior of all
+    /// instructions in the relaxed SIMD proposal is selected.
+    ///
+    /// This is `false` by default.
+    ///
+    /// [proposal]: https://github.com/webassembly/relaxed-simd
+    pub fn relaxed_simd_deterministic(&mut self, enable: bool) -> &mut Self {
+        self.tunables.relaxed_simd_deterministic = enable;
         self
     }
 
@@ -769,8 +867,8 @@ impl Config {
     /// and its documentation.
     ///
     /// The default value for this is `Strategy::Auto`.
-    #[cfg(compiler)]
-    #[cfg_attr(nightlydoc, doc(cfg(feature = "cranelift")))] // see build.rs
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
+    #[cfg_attr(nightlydoc, doc(cfg(any(feature = "cranelift", feature = "winch"))))]
     pub fn strategy(&mut self, strategy: Strategy) -> &mut Self {
         self.compiler_config.strategy = strategy;
         self
@@ -803,8 +901,8 @@ impl Config {
     /// developers of wasmtime itself.
     ///
     /// The default value for this is `false`
-    #[cfg(compiler)]
-    #[cfg_attr(nightlydoc, doc(cfg(feature = "cranelift")))] // see build.rs
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
+    #[cfg_attr(nightlydoc, doc(cfg(any(feature = "cranelift", feature = "winch"))))]
     pub fn cranelift_debug_verifier(&mut self, enable: bool) -> &mut Self {
         let val = if enable { "true" } else { "false" };
         self.compiler_config
@@ -820,8 +918,8 @@ impl Config {
     /// more information see the documentation of [`OptLevel`].
     ///
     /// The default value for this is `OptLevel::None`.
-    #[cfg(compiler)]
-    #[cfg_attr(nightlydoc, doc(cfg(feature = "cranelift")))] // see build.rs
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
+    #[cfg_attr(nightlydoc, doc(cfg(any(feature = "cranelift", feature = "winch"))))]
     pub fn cranelift_opt_level(&mut self, level: OptLevel) -> &mut Self {
         let val = match level {
             OptLevel::None => "none",
@@ -834,30 +932,6 @@ impl Config {
         self
     }
 
-    /// Configures the Cranelift code generator to use its
-    /// "egraph"-based mid-end optimizer.
-    ///
-    /// This optimizer has replaced the compiler's more traditional
-    /// pipeline of optimization passes with a unified code-rewriting
-    /// system. It is on by default, but the traditional optimization
-    /// pass structure is still available for now (it is deprecrated and
-    /// will be removed in a future version).
-    ///
-    /// The default value for this is `true`.
-    #[cfg(compiler)]
-    #[cfg_attr(nightlydoc, doc(cfg(feature = "cranelift")))] // see build.rs
-    #[deprecated(
-        since = "5.0.0",
-        note = "egraphs will be the default and this method will be removed in a future version."
-    )]
-    pub fn cranelift_use_egraphs(&mut self, enable: bool) -> &mut Self {
-        let val = if enable { "true" } else { "false" };
-        self.compiler_config
-            .settings
-            .insert("use_egraphs".to_string(), val.to_string());
-        self
-    }
-
     /// Configures whether Cranelift should perform a NaN-canonicalization pass.
     ///
     /// When Cranelift is used as a code generation backend this will configure
@@ -866,8 +940,8 @@ impl Config {
     /// This is not required by the WebAssembly spec, so it is not enabled by default.
     ///
     /// The default value for this is `false`
-    #[cfg(compiler)]
-    #[cfg_attr(nightlydoc, doc(cfg(feature = "cranelift")))] // see build.rs
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
+    #[cfg_attr(nightlydoc, doc(cfg(any(feature = "cranelift", feature = "winch"))))]
     pub fn cranelift_nan_canonicalization(&mut self, enable: bool) -> &mut Self {
         let val = if enable { "true" } else { "false" };
         self.compiler_config
@@ -892,8 +966,8 @@ impl Config {
     /// The validation of the flags are deferred until the engine is being built, and thus may
     /// cause `Engine::new` fail if the flag's name does not exist, or the value is not appropriate
     /// for the flag type.
-    #[cfg(compiler)]
-    #[cfg_attr(nightlydoc, doc(cfg(feature = "cranelift")))] // see build.rs
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
+    #[cfg_attr(nightlydoc, doc(cfg(any(feature = "cranelift", feature = "winch"))))]
     pub unsafe fn cranelift_flag_enable(&mut self, flag: &str) -> &mut Self {
         self.compiler_config.flags.insert(flag.to_string());
         self
@@ -918,8 +992,8 @@ impl Config {
     ///
     /// For example, feature `wasm_backtrace` will set `unwind_info` to `true`, but if it's
     /// manually set to false then it will fail.
-    #[cfg(compiler)]
-    #[cfg_attr(nightlydoc, doc(cfg(feature = "cranelift")))] // see build.rs
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
+    #[cfg_attr(nightlydoc, doc(cfg(any(feature = "cranelift", feature = "winch"))))]
     pub unsafe fn cranelift_flag_set(&mut self, name: &str, value: &str) -> &mut Self {
         self.compiler_config
             .settings
@@ -1317,7 +1391,7 @@ impl Config {
     /// Configures whether compiled artifacts will contain information to map
     /// native program addresses back to the original wasm module.
     ///
-    /// This configuration option is `true` by default and, if enables,
+    /// This configuration option is `true` by default and, if enabled,
     /// generates the appropriate tables in compiled modules to map from native
     /// address back to wasm source addresses. This is used for displaying wasm
     /// program counters in backtraces as well as generating filenames/line
@@ -1397,6 +1471,15 @@ impl Config {
         self
     }
 
+    /// Configures whether or not a coredump should be generated and attached to
+    /// the anyhow::Error when a trap is raised.
+    ///
+    /// This option is disabled by default.
+    pub fn coredump_on_trap(&mut self, enable: bool) -> &mut Self {
+        self.coredump_on_trap = enable;
+        self
+    }
+
     /// Configures the "guaranteed dense image size" for copy-on-write
     /// initialized memories.
     ///
@@ -1445,7 +1528,7 @@ impl Config {
             bail!("feature 'threads' requires 'bulk_memory' to be enabled");
         }
         #[cfg(feature = "async")]
-        if self.max_wasm_stack > self.async_stack_size {
+        if self.async_support && self.max_wasm_stack > self.async_stack_size {
             bail!("max_wasm_stack size cannot exceed the async_stack_size");
         }
         if self.max_wasm_stack == 0 {
@@ -1486,20 +1569,36 @@ impl Config {
 
     pub(crate) fn build_profiler(&self) -> Result<Box<dyn ProfilingAgent>> {
         Ok(match self.profiling_strategy {
-            ProfilingStrategy::JitDump => Box::new(JitDumpAgent::new()?) as Box<dyn ProfilingAgent>,
-            ProfilingStrategy::VTune => Box::new(VTuneAgent::new()?) as Box<dyn ProfilingAgent>,
-            ProfilingStrategy::None => Box::new(NullProfilerAgent),
+            ProfilingStrategy::PerfMap => profiling::new_perfmap()?,
+            ProfilingStrategy::JitDump => profiling::new_jitdump()?,
+            ProfilingStrategy::VTune => profiling::new_vtune()?,
+            ProfilingStrategy::None => profiling::new_null(),
         })
     }
 
-    #[cfg(compiler)]
-    pub(crate) fn build_compiler(&mut self) -> Result<Box<dyn wasmtime_environ::Compiler>> {
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
+    pub(crate) fn build_compiler(mut self) -> Result<(Self, Box<dyn wasmtime_environ::Compiler>)> {
         let mut compiler = match self.compiler_config.strategy {
-            Strategy::Auto | Strategy::Cranelift => wasmtime_cranelift::builder(),
+            #[cfg(feature = "cranelift")]
+            Strategy::Auto => wasmtime_cranelift::builder(),
+            #[cfg(all(feature = "winch", not(feature = "cranelift")))]
+            Strategy::Auto => wasmtime_winch::builder(),
+            #[cfg(feature = "cranelift")]
+            Strategy::Cranelift => wasmtime_cranelift::builder(),
+            #[cfg(not(feature = "cranelift"))]
+            Strategy::Cranelift => bail!("cranelift support not compiled in"),
+            #[cfg(feature = "winch")]
+            Strategy::Winch => wasmtime_winch::builder(),
+            #[cfg(not(feature = "winch"))]
+            Strategy::Winch => bail!("winch support not compiled in"),
         };
 
         if let Some(target) = &self.compiler_config.target {
             compiler.target(target.clone())?;
+        }
+
+        if let Some(path) = &self.compiler_config.clif_dir {
+            compiler.clif_dir(path)?;
         }
 
         // If probestack is enabled for a target, Wasmtime will always use the
@@ -1521,6 +1620,14 @@ impl Config {
             self.compiler_config
                 .flags
                 .insert("enable_probestack".into());
+        }
+
+        if self.features.tail_call {
+            ensure!(
+                target.architecture != Architecture::S390x,
+                "Tail calls are not supported on s390x yet: \
+                 https://github.com/bytecodealliance/wasmtime/issues/6530"
+            );
         }
 
         if self.native_unwind_info ||
@@ -1551,13 +1658,9 @@ impl Config {
                 bail!("compiler option 'enable_safepoints' must be enabled when 'reference types' is enabled");
             }
         }
-        if self.features.simd {
-            if !self
-                .compiler_config
-                .ensure_setting_unset_or_given("enable_simd", "true")
-            {
-                bail!("compiler option 'enable_simd' must be enabled when 'simd' is enabled");
-            }
+
+        if self.features.relaxed_simd && !self.features.simd {
+            bail!("cannot disable the simd proposal but enable the relaxed simd proposal");
         }
 
         // Apply compiler settings and flags
@@ -1569,10 +1672,12 @@ impl Config {
         }
 
         if let Some(cache_store) = &self.compiler_config.cache_store {
-            compiler.enable_incremental_compilation(cache_store.clone());
+            compiler.enable_incremental_compilation(cache_store.clone())?;
         }
 
-        compiler.build()
+        compiler.set_tunables(self.tunables.clone())?;
+
+        Ok((self, compiler.build()?))
     }
 
     /// Internal setting for whether adapter modules for components will have
@@ -1581,6 +1686,45 @@ impl Config {
     #[cfg(feature = "component-model")]
     pub fn debug_adapter_modules(&mut self, debug: bool) -> &mut Self {
         self.tunables.debug_adapter_modules = debug;
+        self
+    }
+
+    /// Enables clif output when compiling a WebAssembly module.
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
+    pub fn emit_clif(&mut self, path: &Path) -> &mut Self {
+        self.compiler_config.clif_dir = Some(path.to_path_buf());
+        self
+    }
+
+    /// Configures whether, when on macOS, Mach ports are used for exception
+    /// handling instead of traditional Unix-based signal handling.
+    ///
+    /// WebAssembly traps in Wasmtime are implemented with native faults, for
+    /// example a `SIGSEGV` will occur when a WebAssembly guest accesses
+    /// out-of-bounds memory. Handling this can be configured to either use Unix
+    /// signals or Mach ports on macOS. By default Mach ports are used.
+    ///
+    /// Mach ports enable Wasmtime to work by default with foreign
+    /// error-handling systems such as breakpad which also use Mach ports to
+    /// handle signals. In this situation Wasmtime will continue to handle guest
+    /// faults gracefully while any non-guest faults will get forwarded to
+    /// process-level handlers such as breakpad. Some more background on this
+    /// can be found in #2456.
+    ///
+    /// A downside of using mach ports, however, is that they don't interact
+    /// well with `fork()`. Forking a Wasmtime process on macOS will produce a
+    /// child process that cannot successfully run WebAssembly. In this
+    /// situation traditional Unix signal handling should be used as that's
+    /// inherited and works across forks.
+    ///
+    /// If your embedding wants to use a custom error handler which leverages
+    /// Mach ports and you additionally wish to `fork()` the process and use
+    /// Wasmtime in the child process that's not currently possible. Please
+    /// reach out to us if you're in this bucket!
+    ///
+    /// This option defaults to `true`, using Mach ports by default.
+    pub fn macos_use_mach_ports(&mut self, mach_ports: bool) -> &mut Self {
+        self.macos_use_mach_ports = mach_ports;
         self
     }
 }
@@ -1606,8 +1750,13 @@ impl fmt::Debug for Config {
             .field("parse_wasm_debuginfo", &self.tunables.parse_wasm_debuginfo)
             .field("wasm_threads", &self.features.threads)
             .field("wasm_reference_types", &self.features.reference_types)
+            .field(
+                "wasm_function_references",
+                &self.features.function_references,
+            )
             .field("wasm_bulk_memory", &self.features.bulk_memory)
             .field("wasm_simd", &self.features.simd)
+            .field("wasm_relaxed_simd", &self.features.relaxed_simd)
             .field("wasm_multi_value", &self.features.multi_value)
             .field(
                 "static_memory_maximum_size",
@@ -1627,7 +1776,7 @@ impl fmt::Debug for Config {
                 &self.tunables.guard_before_linear_memory,
             )
             .field("parallel_compilation", &self.parallel_compilation);
-        #[cfg(compiler)]
+        #[cfg(any(feature = "cranelift", feature = "winch"))]
         {
             f.field("compiler_config", &self.compiler_config);
         }
@@ -1655,6 +1804,10 @@ pub enum Strategy {
     /// Currently the default backend, Cranelift aims to be a reasonably fast
     /// code generator which generates high quality machine code.
     Cranelift,
+
+    /// A baseline compiler for WebAssembly, currently under active development and not ready for
+    /// production applications.
+    Winch,
 }
 
 /// Possible optimization levels for the Cranelift codegen backend.
@@ -1672,10 +1825,13 @@ pub enum OptLevel {
 }
 
 /// Select which profiling technique to support.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProfilingStrategy {
     /// No profiler support.
     None,
+
+    /// Collect function name information as the "perf map" file format, used with `perf` on Linux.
+    PerfMap,
 
     /// Collect profiling info for "jitdump" file format, used with `perf` on
     /// Linux.

@@ -32,7 +32,7 @@ log = { workspace = true }
 rustix = { workspace = true, features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
-io-extras = "0.17.0"
+io-extras = { workspace = true }
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 workspace = true
@@ -40,9 +40,6 @@ features = [
     "Win32_Foundation",
     "Win32_Networking_WinSock",
 ]
-
-[badges]
-maintenance = { status = "actively-developed" }
 
 [features]
 default = ["trace_log"]

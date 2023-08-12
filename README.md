@@ -60,6 +60,11 @@ $ wasmtime hello.wasm
 Hello, world!
 ```
 
+(Note: make sure you installed Rust using the `rustup` method in the official
+instructions above, and do not have a copy of the Rust toolchain installed on
+your system in some other way as well (e.g. the system package manager). Otherwise, the `rustup target add...`
+command may not install the target for the correct copy of Rust.)
+
 ## Features
 
 * **Fast**. Wasmtime is built on the optimizing [Cranelift] code generator to
@@ -95,7 +100,7 @@ Hello, world!
   standards process all along the way too.
 
 [Wasmtime]: https://github.com/bytecodealliance/wasmtime
-[Cranelift]: https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/README.md
+[Cranelift]: https://cranelift.dev/
 [Google's OSS Fuzz]: https://google.github.io/oss-fuzz/
 [security policy]: https://bytecodealliance.org/security
 [RFC process]: https://github.com/bytecodealliance/rfcs

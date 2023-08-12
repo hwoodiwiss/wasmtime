@@ -25,6 +25,7 @@ fn successful_instantiation() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn memory_limit() -> Result<()> {
     let mut pool = PoolingAllocationConfig::default();
     pool.instance_count(1)
@@ -112,7 +113,13 @@ fn memory_init() -> Result<()> {
 
     let module = Module::new(
         &engine,
-        r#"(module (memory (export "m") 2) (data (i32.const 65530) "this data spans multiple pages") (data (i32.const 10) "hello world"))"#,
+        r#"
+            (module
+                (memory (export "m") 2)
+                (data (i32.const 65530) "this data spans multiple pages")
+                (data (i32.const 10) "hello world")
+            )
+        "#,
     )?;
 
     let mut store = Store::new(&engine, ());
@@ -129,6 +136,7 @@ fn memory_init() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn memory_guard_page_trap() -> Result<()> {
     let mut pool = PoolingAllocationConfig::default();
     pool.instance_count(1)
@@ -141,7 +149,12 @@ fn memory_guard_page_trap() -> Result<()> {
 
     let module = Module::new(
         &engine,
-        r#"(module (memory (export "m") 0) (func (export "f") (param i32) local.get 0 i32.load drop))"#,
+        r#"
+            (module
+                (memory (export "m") 0)
+                (func (export "f") (param i32) local.get 0 i32.load drop)
+            )
+        "#,
     )?;
 
     // Instantiate the module and check for out of bounds trap
@@ -231,6 +244,7 @@ fn memory_zeroed() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn table_limit() -> Result<()> {
     const TABLE_ELEMENTS: u32 = 10;
     let mut pool = PoolingAllocationConfig::default();
@@ -315,6 +329,7 @@ fn table_limit() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn table_init() -> Result<()> {
     let mut pool = PoolingAllocationConfig::default();
     pool.instance_count(1)
@@ -327,7 +342,18 @@ fn table_init() -> Result<()> {
 
     let module = Module::new(
         &engine,
-        r#"(module (table (export "t") 6 funcref) (elem (i32.const 1) 1 2 3 4) (elem (i32.const 0) 0) (func) (func (param i32)) (func (param i32 i32)) (func (param i32 i32 i32)) (func (param i32 i32 i32 i32)))"#,
+        r#"
+            (module
+                (table (export "t") 6 funcref)
+                (elem (i32.const 1) 1 2 3 4)
+                (elem (i32.const 0) 0)
+                (func)
+                (func (param i32))
+                (func (param i32 i32))
+                (func (param i32 i32 i32))
+                (func (param i32 i32 i32 i32))
+            )
+        "#,
     )?;
 
     let mut store = Store::new(&engine, ());
@@ -473,15 +499,17 @@ fn preserve_data_segments() -> Result<()> {
     // Spray some stuff on the heap. If wasm data lived on the heap this should
     // paper over things and help us catch use-after-free here if it would
     // otherwise happen.
-    let mut strings = Vec::new();
-    for _ in 0..1000 {
-        let mut string = String::new();
+    if !cfg!(miri) {
+        let mut strings = Vec::new();
         for _ in 0..1000 {
-            string.push('g');
+            let mut string = String::new();
+            for _ in 0..1000 {
+                string.push('g');
+            }
+            strings.push(string);
         }
-        strings.push(string);
+        drop(strings);
     }
-    drop(strings);
 
     let mem = i.get_memory(&mut store, "mem").unwrap();
 
@@ -528,12 +556,12 @@ fn drop_externref_global_during_module_init() -> Result<()> {
     struct Limiter;
 
     impl ResourceLimiter for Limiter {
-        fn memory_growing(&mut self, _: usize, _: usize, _: Option<usize>) -> bool {
-            false
+        fn memory_growing(&mut self, _: usize, _: usize, _: Option<usize>) -> Result<bool> {
+            Ok(false)
         }
 
-        fn table_growing(&mut self, _: u32, _: u32, _: Option<u32>) -> bool {
-            false
+        fn table_growing(&mut self, _: u32, _: u32, _: Option<u32>) -> Result<bool> {
+            Ok(false)
         }
     }
 
@@ -559,7 +587,7 @@ fn drop_externref_global_during_module_init() -> Result<()> {
     )?;
 
     let mut store = Store::new(&engine, Limiter);
-    drop(Instance::new(&mut store, &module, &[])?);
+    Instance::new(&mut store, &module, &[])?;
     drop(store);
 
     let module = Module::new(
@@ -580,6 +608,7 @@ fn drop_externref_global_during_module_init() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn switch_image_and_non_image() -> Result<()> {
     let mut pool = PoolingAllocationConfig::default();
     pool.instance_count(1);
@@ -638,6 +667,7 @@ fn switch_image_and_non_image() -> Result<()> {
 
 #[test]
 #[cfg(target_pointer_width = "64")]
+#[cfg_attr(miri, ignore)]
 fn instance_too_large() -> Result<()> {
     let mut pool = PoolingAllocationConfig::default();
     pool.instance_size(16).instance_count(1);
@@ -679,20 +709,23 @@ configured maximum of 16 bytes; breakdown of allocation requirement:
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn dynamic_memory_pooling_allocator() -> Result<()> {
-    let max_size = 128 << 20;
-    let mut pool = PoolingAllocationConfig::default();
-    pool.instance_count(1)
-        .instance_memory_pages(max_size / (64 * 1024));
-    let mut config = Config::new();
-    config.static_memory_maximum_size(max_size);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    for guard_size in [0, 1 << 16] {
+        let max_size = 128 << 20;
+        let mut pool = PoolingAllocationConfig::default();
+        pool.instance_count(1)
+            .instance_memory_pages(max_size / (64 * 1024));
+        let mut config = Config::new();
+        config.static_memory_maximum_size(max_size);
+        config.dynamic_memory_guard_size(guard_size);
+        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
-    let engine = Engine::new(&config)?;
+        let engine = Engine::new(&config)?;
 
-    let module = Module::new(
-        &engine,
-        r#"
+        let module = Module::new(
+            &engine,
+            r#"
             (module
                 (memory (export "memory") 1)
 
@@ -715,65 +748,69 @@ fn dynamic_memory_pooling_allocator() -> Result<()> {
                 (data (i32.const 100) "x")
             )
          "#,
-    )?;
+        )?;
 
-    let mut store = Store::new(&engine, ());
-    let instance = Instance::new(&mut store, &module, &[])?;
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[])?;
 
-    let grow = instance.get_typed_func::<u32, i32>(&mut store, "grow")?;
-    let size = instance.get_typed_func::<(), u32>(&mut store, "size")?;
-    let i32_load = instance.get_typed_func::<u32, i32>(&mut store, "i32.load")?;
-    let i32_store = instance.get_typed_func::<(u32, i32), ()>(&mut store, "i32.store")?;
-    let memory = instance.get_memory(&mut store, "memory").unwrap();
+        let grow = instance.get_typed_func::<u32, i32>(&mut store, "grow")?;
+        let size = instance.get_typed_func::<(), u32>(&mut store, "size")?;
+        let i32_load = instance.get_typed_func::<u32, i32>(&mut store, "i32.load")?;
+        let i32_store = instance.get_typed_func::<(u32, i32), ()>(&mut store, "i32.store")?;
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
 
-    // basic length 1 tests
-    // assert_eq!(memory.grow(&mut store, 1)?, 0);
-    assert_eq!(memory.size(&store), 1);
-    assert_eq!(size.call(&mut store, ())?, 1);
-    assert_eq!(i32_load.call(&mut store, 0)?, 0);
-    assert_eq!(i32_load.call(&mut store, 100)?, i32::from(b'x'));
-    i32_store.call(&mut store, (0, 0))?;
-    i32_store.call(&mut store, (100, i32::from(b'y')))?;
-    assert_eq!(i32_load.call(&mut store, 100)?, i32::from(b'y'));
+        // basic length 1 tests
+        // assert_eq!(memory.grow(&mut store, 1)?, 0);
+        assert_eq!(memory.size(&store), 1);
+        assert_eq!(size.call(&mut store, ())?, 1);
+        assert_eq!(i32_load.call(&mut store, 0)?, 0);
+        assert_eq!(i32_load.call(&mut store, 100)?, i32::from(b'x'));
+        i32_store.call(&mut store, (0, 0))?;
+        i32_store.call(&mut store, (100, i32::from(b'y')))?;
+        assert_eq!(i32_load.call(&mut store, 100)?, i32::from(b'y'));
 
-    // basic length 2 tests
-    let page = 64 * 1024;
-    assert_eq!(grow.call(&mut store, 1)?, 1);
-    assert_eq!(memory.size(&store), 2);
-    assert_eq!(size.call(&mut store, ())?, 2);
-    i32_store.call(&mut store, (page, 200))?;
-    assert_eq!(i32_load.call(&mut store, page)?, 200);
+        // basic length 2 tests
+        let page = 64 * 1024;
+        assert_eq!(grow.call(&mut store, 1)?, 1);
+        assert_eq!(memory.size(&store), 2);
+        assert_eq!(size.call(&mut store, ())?, 2);
+        i32_store.call(&mut store, (page, 200))?;
+        assert_eq!(i32_load.call(&mut store, page)?, 200);
 
-    // test writes are visible
-    i32_store.call(&mut store, (2, 100))?;
-    assert_eq!(i32_load.call(&mut store, 2)?, 100);
+        // test writes are visible
+        i32_store.call(&mut store, (2, 100))?;
+        assert_eq!(i32_load.call(&mut store, 2)?, 100);
 
-    // test growth can't exceed maximum
-    let too_many = max_size / (64 * 1024);
-    assert_eq!(grow.call(&mut store, too_many as u32)?, -1);
-    assert!(memory.grow(&mut store, too_many).is_err());
+        // test growth can't exceed maximum
+        let too_many = max_size / (64 * 1024);
+        assert_eq!(grow.call(&mut store, too_many as u32)?, -1);
+        assert!(memory.grow(&mut store, too_many).is_err());
 
-    assert_eq!(memory.data(&store)[page as usize], 200);
+        assert_eq!(memory.data(&store)[page as usize], 200);
 
-    // Re-instantiate in another store.
-    store = Store::new(&engine, ());
-    let instance = Instance::new(&mut store, &module, &[])?;
-    let i32_load = instance.get_typed_func::<u32, i32>(&mut store, "i32.load")?;
-    let memory = instance.get_memory(&mut store, "memory").unwrap();
+        // Re-instantiate in another store.
+        store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[])?;
+        let i32_load = instance.get_typed_func::<u32, i32>(&mut store, "i32.load")?;
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
 
-    // Technically this is out of bounds...
-    assert!(i32_load.call(&mut store, page).is_err());
-    // ... but implementation-wise it should still be mapped memory from before.
-    // Note though that prior writes should all appear as zeros and we can't see
-    // data from the prior instance.
-    //
-    // Note that this part is only implemented on Linux which has
-    // `MADV_DONTNEED`.
-    assert_eq!(memory.data_size(&store), page as usize);
-    if cfg!(target_os = "linux") {
-        unsafe {
-            let ptr = memory.data_ptr(&store);
-            assert_eq!(*ptr.offset(page as isize), 0);
+        // This is out of bounds...
+        assert!(i32_load.call(&mut store, page).is_err());
+        assert_eq!(memory.data_size(&store), page as usize);
+
+        // ... but implementation-wise it should still be mapped memory from
+        // before if we don't have any guard pages.
+        //
+        // Note though that prior writes should all appear as zeros and we can't see
+        // data from the prior instance.
+        //
+        // Note that this part is only implemented on Linux which has
+        // `MADV_DONTNEED`.
+        if cfg!(target_os = "linux") && guard_size == 0 {
+            unsafe {
+                let ptr = memory.data_ptr(&store);
+                assert_eq!(*ptr.offset(page as isize), 0);
+            }
         }
     }
 
@@ -781,6 +818,7 @@ fn dynamic_memory_pooling_allocator() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn zero_memory_pages_disallows_oob() -> Result<()> {
     let mut pool = PoolingAllocationConfig::default();
     pool.instance_count(1).instance_memory_pages(0);

@@ -124,6 +124,9 @@ pub enum MemLabel {
     /// offset from this instruction. This form must be used at emission time;
     /// see `memlabel_finalize()` for how other forms are lowered to this one.
     PCRel(i32),
+    /// An address that refers to a label within a `MachBuffer`, for example a
+    /// constant that lives in the pool at the end of the function.
+    Mach(MachLabel),
 }
 
 impl AMode {
@@ -194,30 +197,23 @@ impl AMode {
             | &AMode::FPOffset { .. }
             | &AMode::SPOffset { .. }
             | &AMode::NominalSPOffset { .. }
+            | &AMode::Const { .. }
             | AMode::Label { .. } => self.clone(),
         }
     }
 }
 
-/// A memory argument to a load/store-pair.
-#[derive(Clone, Debug)]
-pub enum PairAMode {
-    /// Signed, scaled 7-bit offset from a register.
-    SignedOffset(Reg, SImm7Scaled),
-    /// Pre-increment register before address computation.
-    SPPreIndexed(SImm7Scaled),
-    /// Post-increment register after address computation.
-    SPPostIndexed(SImm7Scaled),
-}
+pub use crate::isa::aarch64::lower::isle::generated_code::PairAMode;
 
 impl PairAMode {
     pub(crate) fn with_allocs(&self, allocs: &mut AllocationConsumer<'_>) -> Self {
         // Should match `pairmemarg_operands()`.
         match self {
-            &PairAMode::SignedOffset(reg, simm7scaled) => {
-                PairAMode::SignedOffset(allocs.next(reg), simm7scaled)
-            }
-            &PairAMode::SPPreIndexed(..) | &PairAMode::SPPostIndexed(..) => self.clone(),
+            &PairAMode::SignedOffset { reg, simm7 } => PairAMode::SignedOffset {
+                reg: allocs.next(reg),
+                simm7,
+            },
+            &PairAMode::SPPreIndexed { .. } | &PairAMode::SPPostIndexed { .. } => self.clone(),
         }
     }
 }
@@ -382,7 +378,8 @@ impl PrettyPrint for ExtendOp {
 impl PrettyPrint for MemLabel {
     fn pretty_print(&self, _: u8, _: &mut AllocationConsumer<'_>) -> String {
         match self {
-            &MemLabel::PCRel(off) => format!("pc+{}", off),
+            MemLabel::PCRel(off) => format!("pc+{}", off),
+            MemLabel::Mach(off) => format!("label({})", off.get()),
         }
     }
 }
@@ -465,6 +462,8 @@ impl PrettyPrint for AMode {
                 let simm9 = simm9.pretty_print(8, allocs);
                 format!("[sp], {}", simm9)
             }
+            AMode::Const { addr } => format!("[const({})]", addr.as_u32()),
+
             // Eliminated by `mem_finalize()`.
             &AMode::SPOffset { .. }
             | &AMode::FPOffset { .. }
@@ -479,7 +478,7 @@ impl PrettyPrint for AMode {
 impl PrettyPrint for PairAMode {
     fn pretty_print(&self, _: u8, allocs: &mut AllocationConsumer<'_>) -> String {
         match self {
-            &PairAMode::SignedOffset(reg, simm7) => {
+            &PairAMode::SignedOffset { reg, simm7 } => {
                 let reg = pretty_print_reg(reg, allocs);
                 if simm7.value != 0 {
                     let simm7 = simm7.pretty_print(8, allocs);
@@ -488,11 +487,11 @@ impl PrettyPrint for PairAMode {
                     format!("[{}]", reg)
                 }
             }
-            &PairAMode::SPPreIndexed(simm7) => {
+            &PairAMode::SPPreIndexed { simm7 } => {
                 let simm7 = simm7.pretty_print(8, allocs);
                 format!("[sp, {}]!", simm7)
             }
-            &PairAMode::SPPostIndexed(simm7) => {
+            &PairAMode::SPPostIndexed { simm7 } => {
                 let simm7 = simm7.pretty_print(8, allocs);
                 format!("[sp], {}", simm7)
             }
@@ -730,5 +729,19 @@ impl VectorSize {
             ScalarSize::Size64 => 0b1,
             size => panic!("Unsupported floating-point size for vector op: {:?}", size),
         }
+    }
+}
+
+impl APIKey {
+    /// Returns the encoding of the `auti{key}` instruction used to decrypt the
+    /// `lr` register.
+    pub fn enc_auti_hint(&self) -> u32 {
+        let (crm, op2) = match self {
+            APIKey::AZ => (0b0011, 0b100),
+            APIKey::ASP => (0b0011, 0b101),
+            APIKey::BZ => (0b0011, 0b110),
+            APIKey::BSP => (0b0011, 0b111),
+        };
+        0xd503201f | (crm << 8) | (op2 << 5)
     }
 }

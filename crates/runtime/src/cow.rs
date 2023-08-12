@@ -1,15 +1,18 @@
 //! Copy-on-write initialization support: creation of backing images for
 //! modules, and logic to support mapping these backing images into memory.
 
-#![cfg_attr(not(unix), allow(unused_imports, unused_variables))]
+#![cfg_attr(any(not(unix), miri), allow(unused_imports, unused_variables))]
 
-use crate::MmapVec;
+use crate::{MmapVec, SendSyncPtr};
 use anyhow::Result;
 use libc::c_void;
 use std::fs::File;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::{convert::TryFrom, ops::Range};
-use wasmtime_environ::{DefinedMemoryIndex, MemoryInitialization, MemoryStyle, Module, PrimaryMap};
+use wasmtime_environ::{
+    DefinedMemoryIndex, MemoryInitialization, MemoryPlan, MemoryStyle, Module, PrimaryMap,
+};
 
 /// Backing images for memories in a module.
 ///
@@ -60,14 +63,14 @@ pub struct MemoryImage {
 
 #[derive(Debug)]
 enum FdSource {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(miri)))]
     Mmap(Arc<File>),
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(miri)))]
     Memfd(memfd::Memfd),
 }
 
 impl FdSource {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(miri)))]
     fn as_file(&self) -> &File {
         match self {
             FdSource::Mmap(ref file) => file,
@@ -80,11 +83,11 @@ impl FdSource {
 impl PartialEq for FdSource {
     fn eq(&self, other: &FdSource) -> bool {
         cfg_if::cfg_if! {
-            if #[cfg(unix)] {
+            if #[cfg(all(unix, not(miri)))] {
                 use rustix::fd::AsRawFd;
                 self.as_file().as_raw_fd() == other.as_file().as_raw_fd()
             } else {
-                drop(other);
+                let _ = other;
                 match *self {}
             }
         }
@@ -121,7 +124,7 @@ impl MemoryImage {
         // files, but for now this is still a Linux-specific region of Wasmtime.
         // Some work will be needed to get this file compiling for macOS and
         // Windows.
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, miri)))]
         if let Some(mmap) = mmap {
             let start = mmap.as_ptr() as usize;
             let end = start + mmap.len();
@@ -148,14 +151,17 @@ impl MemoryImage {
         // may be used to place the data in a form that's amenable to an mmap.
 
         cfg_if::cfg_if! {
-            if #[cfg(target_os = "linux")] {
+            if #[cfg(all(target_os = "linux", not(miri)))] {
                 // On Linux `memfd_create` is used to create an anonymous
                 // in-memory file to represent the heap image. This anonymous
                 // file is then used as the basis for further mmaps.
 
                 use std::io::Write;
 
-                let memfd = create_memfd()?;
+                let memfd = match create_memfd()? {
+                    Some(memfd) => memfd,
+                    None => return Ok(None),
+                };
                 memfd.as_file().write_all(data)?;
 
                 // Seal the memfd's data and length.
@@ -197,18 +203,18 @@ impl MemoryImage {
         }
     }
 
-    unsafe fn map_at(&self, base: usize) -> Result<()> {
+    unsafe fn map_at(&self, base: *mut u8) -> Result<()> {
         cfg_if::cfg_if! {
-            if #[cfg(unix)] {
+            if #[cfg(all(unix, not(miri)))] {
                 let ptr = rustix::mm::mmap(
-                    (base + self.linear_memory_offset) as *mut c_void,
+                    base.add(self.linear_memory_offset).cast(),
                     self.len,
                     rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
                     rustix::mm::MapFlags::PRIVATE | rustix::mm::MapFlags::FIXED,
                     self.fd.as_file(),
                     self.fd_offset,
                 )?;
-                assert_eq!(ptr as usize, base + self.linear_memory_offset);
+                assert_eq!(ptr, base.add(self.linear_memory_offset).cast());
                 Ok(())
             } else {
                 match self.fd {}
@@ -216,16 +222,16 @@ impl MemoryImage {
         }
     }
 
-    unsafe fn remap_as_zeros_at(&self, base: usize) -> Result<()> {
+    unsafe fn remap_as_zeros_at(&self, base: *mut u8) -> Result<()> {
         cfg_if::cfg_if! {
             if #[cfg(unix)] {
                 let ptr = rustix::mm::mmap_anonymous(
-                    (base + self.linear_memory_offset) as *mut c_void,
+                    base.add(self.linear_memory_offset).cast(),
                     self.len,
                     rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
                     rustix::mm::MapFlags::PRIVATE | rustix::mm::MapFlags::FIXED,
                 )?;
-                assert_eq!(ptr as usize, base + self.linear_memory_offset);
+                assert_eq!(ptr.cast(), base.add(self.linear_memory_offset));
                 Ok(())
             } else {
                 match self.fd {}
@@ -234,15 +240,24 @@ impl MemoryImage {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn create_memfd() -> Result<memfd::Memfd> {
+#[cfg(all(target_os = "linux", not(miri)))]
+fn create_memfd() -> Result<Option<memfd::Memfd>> {
+    use std::io::ErrorKind;
+
     // Create the memfd. It needs a name, but the
     // documentation for `memfd_create()` says that names can
     // be duplicated with no issues.
-    memfd::MemfdOptions::new()
+    match memfd::MemfdOptions::new()
         .allow_sealing(true)
         .create("wasm-memory-image")
-        .map_err(|e| e.into())
+    {
+        Ok(memfd) => Ok(Some(memfd)),
+        // If this kernel is old enough to not support memfd then attempt to
+        // gracefully handle that and fall back to skipping the memfd
+        // optimization.
+        Err(memfd::Error::Create(err)) if err.kind() == ErrorKind::Unsupported => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 impl ModuleMemoryImages {
@@ -358,10 +373,7 @@ pub struct MemoryImageSlot {
     /// The base address in virtual memory of the actual heap memory.
     ///
     /// Bytes at this address are what is seen by the Wasm guest code.
-    ///
-    /// Note that this is stored as `usize` instead of `*mut u8` to not deal
-    /// with `Send`/`Sync.
-    base: usize,
+    base: SendSyncPtr<u8>,
 
     /// The maximum static memory size which `self.accessible` can grow to.
     static_size: usize,
@@ -410,9 +422,8 @@ impl MemoryImageSlot {
     /// and all memory from `accessible` from `static_size` should be mapped as
     /// `PROT_NONE` backed by zero-bytes.
     pub(crate) fn create(base_addr: *mut c_void, accessible: usize, static_size: usize) -> Self {
-        let base = base_addr as usize;
         MemoryImageSlot {
-            base,
+            base: NonNull::new(base_addr.cast()).unwrap().into(),
             static_size,
             accessible,
             image: None,
@@ -424,7 +435,11 @@ impl MemoryImageSlot {
     #[cfg(feature = "pooling-allocator")]
     pub(crate) fn dummy() -> MemoryImageSlot {
         MemoryImageSlot {
-            base: 0,
+            // This pointer isn't ever actually used so its value doesn't
+            // matter but we need to satisfy `NonNull` requirement so create a
+            // `dangling` pointer as a sentinel that should cause problems if
+            // it's actually used.
+            base: NonNull::dangling().into(),
             static_size: 0,
             image: None,
             accessible: 0,
@@ -484,7 +499,7 @@ impl MemoryImageSlot {
         &mut self,
         initial_size_bytes: usize,
         maybe_image: Option<&Arc<MemoryImage>>,
-        style: &MemoryStyle,
+        plan: &MemoryPlan,
     ) -> Result<()> {
         assert!(!self.dirty);
         assert!(initial_size_bytes <= self.static_size);
@@ -509,22 +524,16 @@ impl MemoryImageSlot {
             self.accessible = initial_size_bytes;
         }
 
-        // Next, if the "static" style of memory is being used then that means
-        // that the addressable heap must be shrunk to match
-        // `initial_size_bytes`. This is because the "static" flavor of memory
-        // relies on page faults to indicate out-of-bounds accesses to memory.
-        //
-        // Note that "dynamic" memories do not shrink the heap here. A dynamic
-        // memory performs dynamic bounds checks so if the remaining heap is
-        // still addressable then that's ok since it still won't get accessed.
-        if initial_size_bytes < self.accessible {
-            match style {
-                MemoryStyle::Static { .. } => {
-                    self.set_protection(initial_size_bytes..self.accessible, false)?;
-                    self.accessible = initial_size_bytes;
-                }
-                MemoryStyle::Dynamic { .. } => {}
-            }
+        // If (1) the accessible region is not in its initial state, and (2) the
+        // memory relies on virtual memory at all (i.e. has offset guard pages
+        // and/or is static), then we need to reset memory protections. Put
+        // another way, the only time it is safe to not reset protections is
+        // when we are using dynamic memory without any guard pages.
+        if initial_size_bytes < self.accessible
+            && (plan.offset_guard_size > 0 || matches!(plan.style, MemoryStyle::Static { .. }))
+        {
+            self.set_protection(initial_size_bytes..self.accessible, false)?;
+            self.accessible = initial_size_bytes;
         }
 
         // Now that memory is sized appropriately the final operation is to
@@ -539,7 +548,7 @@ impl MemoryImageSlot {
                 );
                 if image.len > 0 {
                     unsafe {
-                        image.map_at(self.base)?;
+                        image.map_at(self.base.as_ptr())?;
                     }
                 }
             }
@@ -556,7 +565,7 @@ impl MemoryImageSlot {
     pub(crate) fn remove_image(&mut self) -> Result<()> {
         if let Some(image) = &self.image {
             unsafe {
-                image.remap_as_zeros_at(self.base)?;
+                image.remap_as_zeros_at(self.base.as_ptr())?;
             }
             self.image = None;
         }
@@ -584,7 +593,7 @@ impl MemoryImageSlot {
 
     #[allow(dead_code)] // ignore warnings as this is only used in some cfgs
     unsafe fn reset_all_memory_contents(&mut self, keep_resident: usize) -> Result<()> {
-        if !cfg!(target_os = "linux") {
+        if !cfg!(target_os = "linux") || cfg!(miri) {
             // If we're not on Linux then there's no generic platform way to
             // reset memory back to its original state, so instead reset memory
             // back to entirely zeros with an anonymous backing.
@@ -634,17 +643,13 @@ impl MemoryImageSlot {
                         (keep_resident - image.linear_memory_offset).min(mem_after_image);
 
                     // This is memset (1)
-                    std::ptr::write_bytes(self.base as *mut u8, 0u8, image.linear_memory_offset);
+                    std::ptr::write_bytes(self.base.as_ptr(), 0u8, image.linear_memory_offset);
 
                     // This is madvise (2)
                     self.madvise_reset(image.linear_memory_offset, image.len)?;
 
                     // This is memset (3)
-                    std::ptr::write_bytes(
-                        (self.base + image_end) as *mut u8,
-                        0u8,
-                        remaining_memset,
-                    );
+                    std::ptr::write_bytes(self.base.as_ptr().add(image_end), 0u8, remaining_memset);
 
                     // This is madvise (4)
                     self.madvise_reset(
@@ -672,7 +677,7 @@ impl MemoryImageSlot {
                     // Note that the memset may be zero bytes here.
 
                     // This is memset (1)
-                    std::ptr::write_bytes(self.base as *mut u8, 0u8, keep_resident);
+                    std::ptr::write_bytes(self.base.as_ptr(), 0u8, keep_resident);
 
                     // This is madvise (2)
                     self.madvise_reset(keep_resident, self.accessible - keep_resident)?;
@@ -684,7 +689,7 @@ impl MemoryImageSlot {
             // the rest.
             None => {
                 let size_to_memset = keep_resident.min(self.accessible);
-                std::ptr::write_bytes(self.base as *mut u8, 0u8, size_to_memset);
+                std::ptr::write_bytes(self.base.as_ptr(), 0u8, size_to_memset);
                 self.madvise_reset(size_to_memset, self.accessible - size_to_memset)?;
             }
         }
@@ -701,7 +706,7 @@ impl MemoryImageSlot {
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
                 rustix::mm::madvise(
-                    (self.base + base) as *mut c_void,
+                    self.base.as_ptr().add(base).cast(),
                     len,
                     rustix::mm::Advice::LinuxDontNeed,
                 )?;
@@ -715,27 +720,31 @@ impl MemoryImageSlot {
     fn set_protection(&self, range: Range<usize>, readwrite: bool) -> Result<()> {
         assert!(range.start <= range.end);
         assert!(range.end <= self.static_size);
-        let start = self.base.checked_add(range.start).unwrap();
         if range.len() == 0 {
             return Ok(());
         }
 
         unsafe {
+            let start = self.base.as_ptr().add(range.start);
             cfg_if::cfg_if! {
-                if #[cfg(unix)] {
+                if #[cfg(miri)] {
+                    if readwrite {
+                        std::ptr::write_bytes(start, 0u8, range.len());
+                    }
+                } else if #[cfg(unix)] {
                     let flags = if readwrite {
                         rustix::mm::MprotectFlags::READ | rustix::mm::MprotectFlags::WRITE
                     } else {
                         rustix::mm::MprotectFlags::empty()
                     };
-                    rustix::mm::mprotect(start as *mut _, range.len(), flags)?;
+                    rustix::mm::mprotect(start.cast(), range.len(), flags)?;
                 } else {
                     use windows_sys::Win32::System::Memory::*;
 
                     let failure = if readwrite {
-                        VirtualAlloc(start as _, range.len(), MEM_COMMIT, PAGE_READWRITE).is_null()
+                        VirtualAlloc(start.cast(), range.len(), MEM_COMMIT, PAGE_READWRITE).is_null()
                     } else {
-                        VirtualFree(start as _, range.len(), MEM_DECOMMIT) == 0
+                        VirtualFree(start.cast(), range.len(), MEM_DECOMMIT) == 0
                     };
                     if failure {
                         return Err(std::io::Error::last_os_error().into());
@@ -767,17 +776,19 @@ impl MemoryImageSlot {
 
         unsafe {
             cfg_if::cfg_if! {
-                if #[cfg(unix)] {
+                if #[cfg(miri)] {
+                    std::ptr::write_bytes(self.base.as_ptr(), 0, self.static_size);
+                } else if #[cfg(unix)] {
                     let ptr = rustix::mm::mmap_anonymous(
-                        self.base as *mut c_void,
+                        self.base.as_ptr().cast(),
                         self.static_size,
                         rustix::mm::ProtFlags::empty(),
                         rustix::mm::MapFlags::PRIVATE | rustix::mm::MapFlags::FIXED,
                     )?;
-                    assert_eq!(ptr as usize, self.base);
+                    assert_eq!(ptr, self.base.as_ptr().cast());
                 } else {
                     use windows_sys::Win32::System::Memory::*;
-                    if VirtualFree(self.base as _, self.static_size, MEM_DECOMMIT) == 0 {
+                    if VirtualFree(self.base.as_ptr().cast(), self.static_size, MEM_DECOMMIT) == 0 {
                         return Err(std::io::Error::last_os_error().into());
                     }
                 }
@@ -830,14 +841,19 @@ impl Drop for MemoryImageSlot {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, target_os = "linux", not(miri)))]
 mod test {
     use std::sync::Arc;
 
-    use super::{create_memfd, FdSource, MemoryImage, MemoryImageSlot, MemoryStyle};
+    use super::{FdSource, MemoryImage, MemoryImageSlot, MemoryPlan, MemoryStyle};
     use crate::mmap::Mmap;
     use anyhow::Result;
     use std::io::Write;
+    use wasmtime_environ::Memory;
+
+    fn create_memfd() -> Result<memfd::Memfd> {
+        Ok(super::create_memfd()?.expect("kernel doesn't support memfd"))
+    }
 
     fn create_memfd_with_data(offset: usize, data: &[u8]) -> Result<MemoryImage> {
         // Offset must be page-aligned.
@@ -858,9 +874,23 @@ mod test {
         })
     }
 
+    fn dummy_memory_plan(style: MemoryStyle) -> MemoryPlan {
+        MemoryPlan {
+            style,
+            memory: Memory {
+                minimum: 0,
+                maximum: None,
+                shared: false,
+                memory64: false,
+            },
+            pre_guard_size: 0,
+            offset_guard_size: 0,
+        }
+    }
+
     #[test]
     fn instantiate_no_image() {
-        let style = MemoryStyle::Static { bound: 4 << 30 };
+        let plan = dummy_memory_plan(MemoryStyle::Static { bound: 4 << 30 });
         // 4 MiB mmap'd area, not accessible
         let mut mmap = Mmap::accessible_reserved(0, 4 << 20).unwrap();
         // Create a MemoryImageSlot on top of it
@@ -868,32 +898,32 @@ mod test {
         memfd.no_clear_on_drop();
         assert!(!memfd.is_dirty());
         // instantiate with 64 KiB initial size
-        memfd.instantiate(64 << 10, None, &style).unwrap();
+        memfd.instantiate(64 << 10, None, &plan).unwrap();
         assert!(memfd.is_dirty());
         // We should be able to access this 64 KiB (try both ends) and
         // it should consist of zeroes.
-        let slice = mmap.as_mut_slice();
+        let slice = unsafe { mmap.slice_mut(0..65536) };
         assert_eq!(0, slice[0]);
         assert_eq!(0, slice[65535]);
         slice[1024] = 42;
         assert_eq!(42, slice[1024]);
         // grow the heap
         memfd.set_heap_limit(128 << 10).unwrap();
-        let slice = mmap.as_slice();
+        let slice = unsafe { mmap.slice(0..1 << 20) };
         assert_eq!(42, slice[1024]);
         assert_eq!(0, slice[131071]);
         // instantiate again; we should see zeroes, even as the
         // reuse-anon-mmap-opt kicks in
         memfd.clear_and_remain_ready(0).unwrap();
         assert!(!memfd.is_dirty());
-        memfd.instantiate(64 << 10, None, &style).unwrap();
-        let slice = mmap.as_slice();
+        memfd.instantiate(64 << 10, None, &plan).unwrap();
+        let slice = unsafe { mmap.slice(0..65536) };
         assert_eq!(0, slice[1024]);
     }
 
     #[test]
     fn instantiate_image() {
-        let style = MemoryStyle::Static { bound: 4 << 30 };
+        let plan = dummy_memory_plan(MemoryStyle::Static { bound: 4 << 30 });
         // 4 MiB mmap'd area, not accessible
         let mut mmap = Mmap::accessible_reserved(0, 4 << 20).unwrap();
         // Create a MemoryImageSlot on top of it
@@ -902,46 +932,46 @@ mod test {
         // Create an image with some data.
         let image = Arc::new(create_memfd_with_data(4096, &[1, 2, 3, 4]).unwrap());
         // Instantiate with this image
-        memfd.instantiate(64 << 10, Some(&image), &style).unwrap();
+        memfd.instantiate(64 << 10, Some(&image), &plan).unwrap();
         assert!(memfd.has_image());
-        let slice = mmap.as_mut_slice();
+        let slice = unsafe { mmap.slice_mut(0..65536) };
         assert_eq!(&[1, 2, 3, 4], &slice[4096..4100]);
         slice[4096] = 5;
         // Clear and re-instantiate same image
         memfd.clear_and_remain_ready(0).unwrap();
-        memfd.instantiate(64 << 10, Some(&image), &style).unwrap();
-        let slice = mmap.as_slice();
+        memfd.instantiate(64 << 10, Some(&image), &plan).unwrap();
+        let slice = unsafe { mmap.slice_mut(0..65536) };
         // Should not see mutation from above
         assert_eq!(&[1, 2, 3, 4], &slice[4096..4100]);
         // Clear and re-instantiate no image
         memfd.clear_and_remain_ready(0).unwrap();
-        memfd.instantiate(64 << 10, None, &style).unwrap();
+        memfd.instantiate(64 << 10, None, &plan).unwrap();
         assert!(!memfd.has_image());
-        let slice = mmap.as_slice();
+        let slice = unsafe { mmap.slice_mut(0..65536) };
         assert_eq!(&[0, 0, 0, 0], &slice[4096..4100]);
         // Clear and re-instantiate image again
         memfd.clear_and_remain_ready(0).unwrap();
-        memfd.instantiate(64 << 10, Some(&image), &style).unwrap();
-        let slice = mmap.as_slice();
+        memfd.instantiate(64 << 10, Some(&image), &plan).unwrap();
+        let slice = unsafe { mmap.slice_mut(0..65536) };
         assert_eq!(&[1, 2, 3, 4], &slice[4096..4100]);
         // Create another image with different data.
         let image2 = Arc::new(create_memfd_with_data(4096, &[10, 11, 12, 13]).unwrap());
         memfd.clear_and_remain_ready(0).unwrap();
-        memfd.instantiate(128 << 10, Some(&image2), &style).unwrap();
-        let slice = mmap.as_slice();
+        memfd.instantiate(128 << 10, Some(&image2), &plan).unwrap();
+        let slice = unsafe { mmap.slice_mut(0..65536) };
         assert_eq!(&[10, 11, 12, 13], &slice[4096..4100]);
         // Instantiate the original image again; we should notice it's
         // a different image and not reuse the mappings.
         memfd.clear_and_remain_ready(0).unwrap();
-        memfd.instantiate(64 << 10, Some(&image), &style).unwrap();
-        let slice = mmap.as_slice();
+        memfd.instantiate(64 << 10, Some(&image), &plan).unwrap();
+        let slice = unsafe { mmap.slice_mut(0..65536) };
         assert_eq!(&[1, 2, 3, 4], &slice[4096..4100]);
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn memset_instead_of_madvise() {
-        let style = MemoryStyle::Static { bound: 100 };
+        let plan = dummy_memory_plan(MemoryStyle::Static { bound: 100 });
         let mut mmap = Mmap::accessible_reserved(0, 4 << 20).unwrap();
         let mut memfd = MemoryImageSlot::create(mmap.as_mut_ptr() as *mut _, 0, 4 << 20);
         memfd.no_clear_on_drop();
@@ -950,9 +980,9 @@ mod test {
         for image_off in [0, 4096, 8 << 10] {
             let image = Arc::new(create_memfd_with_data(image_off, &[1, 2, 3, 4]).unwrap());
             for amt_to_memset in [0, 4096, 10 << 12, 1 << 20, 10 << 20] {
-                memfd.instantiate(64 << 10, Some(&image), &style).unwrap();
+                memfd.instantiate(64 << 10, Some(&image), &plan).unwrap();
                 assert!(memfd.has_image());
-                let slice = mmap.as_mut_slice();
+                let slice = unsafe { mmap.slice_mut(0..64 << 10) };
                 if image_off > 0 {
                     assert_eq!(slice[image_off - 1], 0);
                 }
@@ -966,8 +996,9 @@ mod test {
 
         // Test without an image
         for amt_to_memset in [0, 4096, 10 << 12, 1 << 20, 10 << 20] {
-            memfd.instantiate(64 << 10, None, &style).unwrap();
-            for chunk in mmap.as_mut_slice()[..64 << 10].chunks_mut(1024) {
+            memfd.instantiate(64 << 10, None, &plan).unwrap();
+            let mem = unsafe { mmap.slice_mut(0..64 << 10) };
+            for chunk in mem.chunks_mut(1024) {
                 assert_eq!(chunk[0], 0);
                 chunk[0] = 5;
             }
@@ -978,7 +1009,7 @@ mod test {
     #[test]
     #[cfg(target_os = "linux")]
     fn dynamic() {
-        let style = MemoryStyle::Dynamic { reserve: 200 };
+        let plan = dummy_memory_plan(MemoryStyle::Dynamic { reserve: 200 });
 
         let mut mmap = Mmap::accessible_reserved(0, 4 << 20).unwrap();
         let mut memfd = MemoryImageSlot::create(mmap.as_mut_ptr() as *mut _, 0, 4 << 20);
@@ -988,9 +1019,9 @@ mod test {
 
         // Instantiate the image and test that memory remains accessible after
         // it's cleared.
-        memfd.instantiate(initial, Some(&image), &style).unwrap();
+        memfd.instantiate(initial, Some(&image), &plan).unwrap();
         assert!(memfd.has_image());
-        let slice = mmap.as_mut_slice();
+        let slice = unsafe { mmap.slice_mut(0..(64 << 10) + 4096) };
         assert_eq!(&[1, 2, 3, 4], &slice[4096..4100]);
         slice[4096] = 5;
         assert_eq!(&[5, 2, 3, 4], &slice[4096..4100]);
@@ -999,7 +1030,7 @@ mod test {
 
         // Re-instantiate make sure it preserves memory. Grow a bit and set data
         // beyond the initial size.
-        memfd.instantiate(initial, Some(&image), &style).unwrap();
+        memfd.instantiate(initial, Some(&image), &plan).unwrap();
         assert_eq!(&[1, 2, 3, 4], &slice[4096..4100]);
         memfd.set_heap_limit(initial * 2).unwrap();
         assert_eq!(&[0, 0], &slice[initial..initial + 2]);
@@ -1012,7 +1043,7 @@ mod test {
 
         // Instantiate again, and again memory beyond the initial size should
         // still be accessible. Grow into it again and make sure it works.
-        memfd.instantiate(initial, Some(&image), &style).unwrap();
+        memfd.instantiate(initial, Some(&image), &plan).unwrap();
         assert_eq!(&[0, 0], &slice[initial..initial + 2]);
         memfd.set_heap_limit(initial * 2).unwrap();
         assert_eq!(&[0, 0], &slice[initial..initial + 2]);
@@ -1021,7 +1052,7 @@ mod test {
         memfd.clear_and_remain_ready(0).unwrap();
 
         // Reset the image to none and double-check everything is back to zero
-        memfd.instantiate(64 << 10, None, &style).unwrap();
+        memfd.instantiate(64 << 10, None, &plan).unwrap();
         assert!(!memfd.has_image());
         assert_eq!(&[0, 0, 0, 0], &slice[4096..4100]);
         assert_eq!(&[0, 0], &slice[initial..initial + 2]);

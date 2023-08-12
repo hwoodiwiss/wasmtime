@@ -15,11 +15,11 @@ anyhow = { workspace = true }
 cranelift-entity = { workspace = true }
 wasmtime-types = { workspace = true }
 wasmparser = { workspace = true }
-indexmap = { version = "1.0.2", features = ["serde-1"] }
+indexmap = { workspace = true, features = ["serde"] }
 thiserror = { workspace = true }
 serde = { version = "1.0.94", features = ["derive"] }
 log = { workspace = true }
-gimli = { workspace = true }
+gimli = { workspace = true, features = ["write"] }
 object = { workspace = true, features = ['write_core'] }
 target-lexicon = { workspace = true }
 wasm-encoder = { workspace = true, optional = true }
@@ -35,9 +35,6 @@ wat = { workspace = true }
 [[example]]
 name = "factc"
 required-features = ['component-model']
-
-[badges]
-maintenance = { status = "actively-developed" }
 
 [features]
 component-model = [

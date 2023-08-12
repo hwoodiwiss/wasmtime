@@ -19,6 +19,18 @@ use target_lexicon::Triple;
 //=============================================================================
 // Helpers for instruction lowering.
 
+impl Lower<'_, Inst> {
+    #[inline]
+    pub fn temp_writable_gpr(&mut self) -> WritableGpr {
+        WritableGpr::from_writable_reg(self.alloc_tmp(types::I64).only_reg().unwrap()).unwrap()
+    }
+
+    #[inline]
+    pub fn temp_writable_xmm(&mut self) -> WritableXmm {
+        WritableXmm::from_writable_reg(self.alloc_tmp(types::F64).only_reg().unwrap()).unwrap()
+    }
+}
+
 fn is_int_or_ref_ty(ty: Type) -> bool {
     match ty {
         types::I8 | types::I16 | types::I32 | types::I64 | types::R64 => true,
@@ -70,26 +82,42 @@ fn put_input_in_reg(ctx: &mut Lower<Inst>, spec: InsnInput) -> Reg {
         .expect("Multi-register value not expected")
 }
 
+enum MergeableLoadSize {
+    /// The load size performed by a sinkable load merging operation is
+    /// precisely the size necessary for the type in question.
+    Exact,
+
+    /// Narrower-than-32-bit values are handled by ALU insts that are at least
+    /// 32 bits wide, which is normally OK as we ignore upper buts; but, if we
+    /// generate, e.g., a direct-from-memory 32-bit add for a byte value and
+    /// the byte is the last byte in a page, the extra data that we load is
+    /// incorrectly accessed. So we only allow loads to merge for
+    /// 32-bit-and-above widths.
+    Min32,
+}
+
 /// Determines whether a load operation (indicated by `src_insn`) can be merged
 /// into the current lowering point. If so, returns the address-base source (as
 /// an `InsnInput`) and an offset from that address from which to perform the
 /// load.
-fn is_mergeable_load(ctx: &mut Lower<Inst>, src_insn: IRInst) -> Option<(InsnInput, i32)> {
+fn is_mergeable_load(
+    ctx: &mut Lower<Inst>,
+    src_insn: IRInst,
+    size: MergeableLoadSize,
+) -> Option<(InsnInput, i32)> {
     let insn_data = ctx.data(src_insn);
     let inputs = ctx.num_inputs(src_insn);
     if inputs != 1 {
         return None;
     }
 
+    // If this type is too small to get a merged load, don't merge the load.
     let load_ty = ctx.output_ty(src_insn, 0);
     if ty_bits(load_ty) < 32 {
-        // Narrower values are handled by ALU insts that are at least 32 bits
-        // wide, which is normally OK as we ignore upper buts; but, if we
-        // generate, e.g., a direct-from-memory 32-bit add for a byte value and
-        // the byte is the last byte in a page, the extra data that we load is
-        // incorrectly accessed. So we only allow loads to merge for
-        // 32-bit-and-above widths.
-        return None;
+        match size {
+            MergeableLoadSize::Exact => {}
+            MergeableLoadSize::Min32 => return None,
+        }
     }
 
     // Just testing the opcode is enough, because the width will always match if
@@ -134,7 +162,7 @@ fn emit_vm_call(
 
     // TODO avoid recreating signatures for every single Libcall function.
     let call_conv = CallConv::for_libcall(flags, CallConv::triple_default(triple));
-    let sig = libcall.signature(call_conv);
+    let sig = libcall.signature(call_conv, types::I64);
     let caller_conv = ctx.abi().call_conv(ctx.sigs());
 
     if !ctx.sigs().have_abi_sig_for_signature(&sig) {
@@ -143,7 +171,7 @@ fn emit_vm_call(
     }
 
     let mut abi =
-        X64Caller::from_libcall(ctx.sigs(), &sig, &extname, dist, caller_conv, flags.clone())?;
+        X64CallSite::from_libcall(ctx.sigs(), &sig, &extname, dist, caller_conv, flags.clone());
 
     abi.emit_stack_pre_adjust(ctx);
 
@@ -250,9 +278,9 @@ fn lower_to_amode(ctx: &mut Lower<Inst>, spec: InsnInput, offset: i32) -> Amode 
                         let uext_cst: u64 = (cst << shift) >> shift;
 
                         let final_offset = (offset as i64).wrapping_add(uext_cst as i64);
-                        if low32_will_sign_extend_to_64(final_offset as u64) {
+                        if let Ok(final_offset) = i32::try_from(final_offset) {
                             let base = put_input_in_reg(ctx, add_inputs[1 - i]);
-                            return Amode::imm_reg(final_offset as u32, base).with_flags(flags);
+                            return Amode::imm_reg(final_offset, base).with_flags(flags);
                         }
                     }
                 }
@@ -260,9 +288,9 @@ fn lower_to_amode(ctx: &mut Lower<Inst>, spec: InsnInput, offset: i32) -> Amode 
                 // If it's a constant, add it directly!
                 if let Some(cst) = ctx.get_input_as_source_or_const(add, i).constant {
                     let final_offset = (offset as i64).wrapping_add(cst as i64);
-                    if low32_will_sign_extend_to_64(final_offset as u64) {
+                    if let Ok(final_offset) = i32::try_from(final_offset) {
                         let base = put_input_in_reg(ctx, add_inputs[1 - i]);
-                        return Amode::imm_reg(final_offset as u32, base).with_flags(flags);
+                        return Amode::imm_reg(final_offset, base).with_flags(flags);
                     }
                 }
             }
@@ -275,7 +303,7 @@ fn lower_to_amode(ctx: &mut Lower<Inst>, spec: InsnInput, offset: i32) -> Amode 
         };
 
         return Amode::imm_reg_reg_shift(
-            offset as u32,
+            offset,
             Gpr::new(base).unwrap(),
             Gpr::new(index).unwrap(),
             shift,
@@ -284,7 +312,7 @@ fn lower_to_amode(ctx: &mut Lower<Inst>, spec: InsnInput, offset: i32) -> Amode 
     }
 
     let input = put_input_in_reg(ctx, spec);
-    Amode::imm_reg(offset as u32, input).with_flags(flags)
+    Amode::imm_reg(offset, input).with_flags(flags)
 }
 
 //=============================================================================

@@ -1,7 +1,6 @@
 //! Helper functions and structures for the translation.
 use crate::environ::TargetEnvironment;
 use crate::WasmResult;
-use core::convert::TryInto;
 use core::u32;
 use cranelift_codegen::ir;
 use cranelift_frontend::FunctionBuilder;
@@ -23,26 +22,18 @@ where
     return Ok(match ty {
         wasmparser::BlockType::Empty => {
             let params: &'static [wasmparser::ValType] = &[];
-            let results: &'static [wasmparser::ValType] = &[];
+            let results: std::vec::Vec<wasmparser::ValType> = vec![];
             (
                 itertools::Either::Left(params.iter().copied()),
-                itertools::Either::Left(results.iter().copied()),
+                itertools::Either::Left(results.into_iter()),
             )
         }
         wasmparser::BlockType::Type(ty) => {
             let params: &'static [wasmparser::ValType] = &[];
-            let results: &'static [wasmparser::ValType] = match ty {
-                wasmparser::ValType::I32 => &[wasmparser::ValType::I32],
-                wasmparser::ValType::I64 => &[wasmparser::ValType::I64],
-                wasmparser::ValType::F32 => &[wasmparser::ValType::F32],
-                wasmparser::ValType::F64 => &[wasmparser::ValType::F64],
-                wasmparser::ValType::V128 => &[wasmparser::ValType::V128],
-                wasmparser::ValType::ExternRef => &[wasmparser::ValType::ExternRef],
-                wasmparser::ValType::FuncRef => &[wasmparser::ValType::FuncRef],
-            };
+            let results: std::vec::Vec<wasmparser::ValType> = vec![ty.clone()];
             (
                 itertools::Either::Left(params.iter().copied()),
-                itertools::Either::Left(results.iter().copied()),
+                itertools::Either::Left(results.into_iter()),
             )
         }
         wasmparser::BlockType::FuncType(ty_index) => {
@@ -79,8 +70,9 @@ pub fn block_with_params<PE: TargetEnvironment + ?Sized>(
             wasmparser::ValType::F64 => {
                 builder.append_block_param(block, ir::types::F64);
             }
-            wasmparser::ValType::ExternRef | wasmparser::ValType::FuncRef => {
-                builder.append_block_param(block, environ.reference_type(ty.try_into()?));
+            wasmparser::ValType::Ref(rt) => {
+                let hty = environ.convert_heap_type(rt.heap_type());
+                builder.append_block_param(block, environ.reference_type(hty));
             }
             wasmparser::ValType::V128 => {
                 builder.append_block_param(block, ir::types::I8X16);

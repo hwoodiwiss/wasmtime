@@ -12,8 +12,8 @@ block0:
 
 ; VCode:
 ; block0:
-;   trap
-; 
+;   .word 0x0000 # trap=user0
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   .byte 0x00, 0x00 ; trap: user0
@@ -25,8 +25,8 @@ block0:
 
 ; VCode:
 ; block0:
-;   trap
-; 
+;   .word 0x0000 # trap=user0
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   .byte 0x00, 0x00 ; trap: user0
@@ -46,8 +46,8 @@ block0(v0: i64):
 ; block2:
 ;   br %r14
 ; block1:
-;   trap
-; 
+;   .word 0x0000 # trap=user0
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   clgfi %r2, 0x2a
@@ -72,8 +72,8 @@ block0(v0: i64):
 ; block1:
 ;   br %r14
 ; block2:
-;   trap
-; 
+;   .word 0x0000 # trap=user0
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   clgfi %r2, 0x2a
@@ -98,8 +98,8 @@ block0(v0: i64):
 ; block1:
 ;   br %r14
 ; block2:
-;   trap
-; 
+;   .word 0x0000 # trap=user0
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   clgfi %r2, 0x2a
@@ -117,9 +117,9 @@ block0:
 
 ; VCode:
 ; block0:
-;   debugtrap
+;   .word 0x0001 # debugtrap
 ;   br %r14
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   .byte 0x00, 0x01

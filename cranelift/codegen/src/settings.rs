@@ -161,9 +161,9 @@ impl Builder {
     }
 
     /// Extract contents of builder once everything is configured.
-    pub fn state_for(self, name: &str) -> Box<[u8]> {
+    pub fn state_for(&self, name: &str) -> &[u8] {
         assert_eq!(name, self.template.name);
-        self.bytes
+        &self.bytes
     }
 
     /// Iterates the available settings in the builder.
@@ -525,18 +525,16 @@ tls_model = "none"
 libcall_call_conv = "isa_default"
 probestack_size_log2 = 12
 probestack_strategy = "outline"
+bb_padding_log2_minus_one = 0
 regalloc_checker = false
 regalloc_verbose_logs = false
 enable_alias_analysis = true
-use_egraphs = true
 enable_verifier = true
 is_pic = false
 use_colocated_libcalls = false
-avoid_div_traps = false
 enable_float = true
 enable_nan_canonicalization = false
 enable_pinned_reg = false
-enable_simd = false
 enable_atomics = true
 enable_safepoints = false
 enable_llvm_abi_extensions = false
@@ -559,18 +557,17 @@ enable_incremental_compilation_cache_checks = false
             );
         }
         assert_eq!(f.opt_level(), super::OptLevel::None);
-        assert_eq!(f.enable_simd(), false);
     }
 
     #[test]
     fn modify_bool() {
         let mut b = builder();
         assert_eq!(b.enable("not_there"), Err(BadName("not_there".to_string())));
-        assert_eq!(b.enable("enable_simd"), Ok(()));
-        assert_eq!(b.set("enable_simd", "false"), Ok(()));
+        assert_eq!(b.enable("enable_atomics"), Ok(()));
+        assert_eq!(b.set("enable_atomics", "false"), Ok(()));
 
         let f = Flags::new(b);
-        assert_eq!(f.enable_simd(), false);
+        assert_eq!(f.enable_atomics(), false);
     }
 
     #[test]
@@ -580,9 +577,12 @@ enable_incremental_compilation_cache_checks = false
             b.set("not_there", "true"),
             Err(BadName("not_there".to_string()))
         );
-        assert_eq!(b.set("enable_simd", ""), Err(BadValue("bool".to_string())));
         assert_eq!(
-            b.set("enable_simd", "best"),
+            b.set("enable_atomics", ""),
+            Err(BadValue("bool".to_string()))
+        );
+        assert_eq!(
+            b.set("enable_atomics", "best"),
             Err(BadValue("bool".to_string()))
         );
         assert_eq!(
@@ -592,10 +592,10 @@ enable_incremental_compilation_cache_checks = false
             ))
         );
         assert_eq!(b.set("opt_level", "speed"), Ok(()));
-        assert_eq!(b.set("enable_simd", "0"), Ok(()));
+        assert_eq!(b.set("enable_atomics", "0"), Ok(()));
 
         let f = Flags::new(b);
-        assert_eq!(f.enable_simd(), false);
+        assert_eq!(f.enable_atomics(), false);
         assert_eq!(f.opt_level(), super::OptLevel::Speed);
     }
 }

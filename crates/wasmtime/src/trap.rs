@@ -1,3 +1,4 @@
+use crate::coredump::WasmCoreDump;
 use crate::store::StoreOpaque;
 use crate::{AsContext, Module};
 use anyhow::Error;
@@ -79,8 +80,12 @@ pub(crate) fn from_runtime_box(
     store: &StoreOpaque,
     runtime_trap: Box<wasmtime_runtime::Trap>,
 ) -> Error {
-    let wasmtime_runtime::Trap { reason, backtrace } = *runtime_trap;
-    let (error, pc) = match reason {
+    let wasmtime_runtime::Trap {
+        reason,
+        backtrace,
+        coredumpstack,
+    } = *runtime_trap;
+    let (mut error, pc) = match reason {
         // For user-defined errors they're already an `anyhow::Error` so no
         // conversion is really necessary here, but a `backtrace` may have
         // been captured so it's attempted to get inserted here.
@@ -103,26 +108,38 @@ pub(crate) fn from_runtime_box(
             );
             (error, None)
         }
-        wasmtime_runtime::TrapReason::Jit(pc) => {
+        wasmtime_runtime::TrapReason::Jit { pc, faulting_addr } => {
             let code = store
                 .modules()
                 .lookup_trap_code(pc)
                 .unwrap_or(Trap::StackOverflow);
-            (code.into(), Some(pc))
+            let mut err: Error = code.into();
+
+            // If a fault address was present, for example with segfaults,
+            // then simultaneously assert that it's within a known linear memory
+            // and additionally translate it to a wasm-local address to be added
+            // as context to the error.
+            if let Some(fault) = faulting_addr.and_then(|addr| store.wasm_fault(pc, addr)) {
+                err = err.context(fault);
+            }
+            (err, Some(pc))
         }
         wasmtime_runtime::TrapReason::Wasm(trap_code) => (trap_code.into(), None),
     };
-    match backtrace {
-        Some(bt) => {
-            let bt = WasmBacktrace::from_captured(store, bt, pc);
-            if bt.wasm_trace.is_empty() {
-                error
-            } else {
-                error.context(bt)
-            }
+
+    if let Some(bt) = backtrace {
+        let bt = WasmBacktrace::from_captured(store, bt, pc);
+        if !bt.wasm_trace.is_empty() {
+            error = error.context(bt);
         }
-        None => error,
     }
+
+    if let Some(coredump) = coredumpstack {
+        let bt = WasmBacktrace::from_captured(store, coredump.bt, pc);
+        let cd = WasmCoreDump::new(store, bt);
+        error = error.context(cd);
+    }
+    error
 }
 
 /// Representation of a backtrace of function frames in a WebAssembly module for
@@ -254,7 +271,11 @@ impl WasmBacktrace {
     /// always captures a backtrace.
     pub fn force_capture(store: impl AsContext) -> WasmBacktrace {
         let store = store.as_context();
-        Self::from_captured(store.0, wasmtime_runtime::Backtrace::new(), None)
+        Self::from_captured(
+            store.0,
+            wasmtime_runtime::Backtrace::new(store.0.runtime_limits()),
+            None,
+        )
     }
 
     fn from_captured(
@@ -450,7 +471,7 @@ impl FrameInfo {
         if let Some(s) = &module.symbolize_context().ok().and_then(|c| c) {
             if let Some(offset) = instr.and_then(|i| i.file_offset()) {
                 let to_lookup = u64::from(offset) - s.code_section_offset();
-                if let Ok(mut frames) = s.addr2line().find_frames(to_lookup) {
+                if let Ok(mut frames) = s.addr2line().find_frames(to_lookup).skip_all_loads() {
                     while let Ok(Some(frame)) = frames.next() {
                         symbols.push(FrameSymbol {
                             name: frame

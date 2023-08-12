@@ -13,7 +13,7 @@ block0(v0: i8):
 ;   mv a3,a0
 ;   brev8 a0,a3##tmp=t2 tmp2=a2 step=a1 ty=i8
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a3, a0, 0
@@ -51,7 +51,7 @@ block0(v0: i16):
 ;   rev8 a4,a2##step=a6 tmp=a5
 ;   srli a0,a4,48
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a7, a0, 0
@@ -100,7 +100,7 @@ block0(v0: i32):
 ;   rev8 a4,a2##step=a6 tmp=a5
 ;   srli a0,a4,32
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a7, a0, 0
@@ -148,7 +148,7 @@ block0(v0: i64):
 ;   rev8 t2,a6##step=a1 tmp=a0
 ;   brev8 a0,t2##tmp=a3 tmp2=a4 step=a5 ty=i64
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a6, a0, 0
@@ -199,7 +199,7 @@ block0(v0: i128):
 ;   rev8 t4,a3##step=t1 tmp=t0
 ;   brev8 a0,t4##tmp=a4 tmp2=a3 step=a2 ty=i64
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a3, a0, 0
@@ -276,7 +276,7 @@ block0(v0: i8):
 ;   mv a2,a0
 ;   clz a0,a2##ty=i8 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -304,7 +304,7 @@ block0(v0: i16):
 ;   mv a2,a0
 ;   clz a0,a2##ty=i16 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -332,7 +332,7 @@ block0(v0: i32):
 ;   mv a2,a0
 ;   clz a0,a2##ty=i32 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -360,7 +360,7 @@ block0(v0: i64):
 ;   mv a2,a0
 ;   clz a0,a2##ty=i64 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -385,28 +385,25 @@ block0(v0: i128):
 
 ; VCode:
 ; block0:
-;   mv t0,a1
-;   clz a2,t0##ty=i64 tmp=a3 step=a1
+;   clz a2,a1##ty=i64 tmp=a4 step=a3
 ;   clz a6,a0##ty=i64 tmp=a4 step=a5
-;   li t3,64
-;   select_reg t0,a6,zero##condition=(t3 eq a2)
-;   add a0,a2,t0
+;   select_reg t3,a6,zero##condition=(a1 eq zero)
+;   add a0,a2,t3
 ;   li a1,0
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
-;   ori t0, a1, 0
 ;   ori a2, zero, 0
-;   addi a1, zero, 0x40
-;   addi a3, zero, 1
-;   slli a3, a3, 0x3f
-;   blez a1, 0x1c
-;   and t5, a3, t0
+;   addi a3, zero, 0x40
+;   addi a4, zero, 1
+;   slli a4, a4, 0x3f
+;   blez a3, 0x1c
+;   and t5, a4, a1
 ;   bne zero, t5, 0x14
 ;   addi a2, a2, 1
-;   addi a1, a1, -1
-;   srli a3, a3, 1
+;   addi a3, a3, -1
+;   srli a4, a4, 1
 ;   j -0x18
 ;   ori a6, zero, 0
 ;   addi a5, zero, 0x40
@@ -419,12 +416,11 @@ block0(v0: i128):
 ;   addi a5, a5, -1
 ;   srli a4, a4, 1
 ;   j -0x18
-;   addi t3, zero, 0x40
-;   beq t3, a2, 0xc
-;   ori t0, zero, 0
+;   beqz a1, 0xc
+;   ori t3, zero, 0
 ;   j 8
-;   ori t0, a6, 0
-;   add a0, a2, t0
+;   ori t3, a6, 0
+;   add a0, a2, t3
 ;   mv a1, zero
 ;   ret
 
@@ -438,19 +434,19 @@ block0(v0: i8):
 ; block0:
 ;   slli t2,a0,56
 ;   srai a1,t2,56
-;   not a3,a0
-;   select_reg a5,a3,a0##condition=(a1 slt zero)
+;   not a3,a1
+;   select_reg a5,a3,a1##condition=(a1 slt zero)
 ;   clz t4,a5##ty=i8 tmp=a7 step=t3
 ;   addi a0,t4,-1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli t2, a0, 0x38
 ;   srai a1, t2, 0x38
-;   not a3, a0
+;   not a3, a1
 ;   bltz a1, 0xc
-;   ori a5, a0, 0
+;   ori a5, a1, 0
 ;   j 8
 ;   ori a5, a3, 0
 ;   ori t4, zero, 0
@@ -477,19 +473,19 @@ block0(v0: i16):
 ; block0:
 ;   slli t2,a0,48
 ;   srai a1,t2,48
-;   not a3,a0
-;   select_reg a5,a3,a0##condition=(a1 slt zero)
+;   not a3,a1
+;   select_reg a5,a3,a1##condition=(a1 slt zero)
 ;   clz t4,a5##ty=i16 tmp=a7 step=t3
 ;   addi a0,t4,-1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli t2, a0, 0x30
 ;   srai a1, t2, 0x30
-;   not a3, a0
+;   not a3, a1
 ;   bltz a1, 0xc
-;   ori a5, a0, 0
+;   ori a5, a1, 0
 ;   j 8
 ;   ori a5, a3, 0
 ;   ori t4, zero, 0
@@ -515,18 +511,18 @@ block0(v0: i32):
 ; VCode:
 ; block0:
 ;   sext.w t2,a0
-;   not a1,a0
-;   select_reg a3,a1,a0##condition=(t2 slt zero)
+;   not a1,t2
+;   select_reg a3,a1,t2##condition=(t2 slt zero)
 ;   clz a7,a3##ty=i32 tmp=a5 step=a6
 ;   addi a0,a7,-1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   sext.w t2, a0
-;   not a1, a0
+;   not a1, t2
 ;   bltz t2, 0xc
-;   ori a3, a0, 0
+;   ori a3, t2, 0
 ;   j 8
 ;   ori a3, a1, 0
 ;   ori a7, zero, 0
@@ -556,7 +552,7 @@ block0(v0: i64):
 ;   clz a5,a1##ty=i64 tmp=a3 step=a4
 ;   addi a0,a5,-1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not t2, a0
@@ -592,14 +588,13 @@ block0(v0: i128):
 ;   select_reg a6,a4,a1##condition=(a1 slt zero)
 ;   clz t0,a6##ty=i64 tmp=t3 step=t4
 ;   clz a1,a2##ty=i64 tmp=t2 step=a0
-;   li a3,64
-;   select_reg a5,a1,zero##condition=(a3 eq t0)
-;   add a7,t0,a5
-;   li t4,0
-;   addi a0,a7,-1
+;   select_reg a3,a1,zero##condition=(a6 eq zero)
+;   add a5,t0,a3
+;   li a7,0
+;   addi a0,a5,-1
 ;   li a1,0
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a2, a0
@@ -632,14 +627,13 @@ block0(v0: i128):
 ;   addi a0, a0, -1
 ;   srli t2, t2, 1
 ;   j -0x18
-;   addi a3, zero, 0x40
-;   beq a3, t0, 0xc
-;   ori a5, zero, 0
+;   beqz a6, 0xc
+;   ori a3, zero, 0
 ;   j 8
-;   ori a5, a1, 0
-;   add a7, t0, a5
-;   mv t4, zero
-;   addi a0, a7, -1
+;   ori a3, a1, 0
+;   add a5, t0, a3
+;   mv a7, zero
+;   addi a0, a5, -1
 ;   mv a1, zero
 ;   ret
 
@@ -654,7 +648,7 @@ block0(v0: i8):
 ;   mv a2,a0
 ;   ctz a0,a2##ty=i8 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -681,7 +675,7 @@ block0(v0: i16):
 ;   mv a2,a0
 ;   ctz a0,a2##ty=i16 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -708,7 +702,7 @@ block0(v0: i32):
 ;   mv a2,a0
 ;   ctz a0,a2##ty=i32 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -735,7 +729,7 @@ block0(v0: i64):
 ;   mv a2,a0
 ;   ctz a0,a2##ty=i64 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -759,44 +753,42 @@ block0(v0: i128):
 
 ; VCode:
 ; block0:
-;   mv t0,a0
-;   ctz a2,t0##ty=i64 tmp=a0 step=a3
-;   ctz a6,a1##ty=i64 tmp=a4 step=a5
-;   li t3,64
-;   select_reg t0,a6,zero##condition=(t3 eq a2)
-;   add a0,a2,t0
+;   mv t4,a1
+;   ctz a2,t4##ty=i64 tmp=a3 step=a1
+;   ctz a6,a0##ty=i64 tmp=a4 step=a5
+;   select_reg t3,a2,zero##condition=(a0 eq zero)
+;   add a0,a6,t3
 ;   li a1,0
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
-;   ori t0, a0, 0
+;   ori t4, a1, 0
 ;   ori a2, zero, 0
-;   addi a3, zero, 0x40
-;   addi a0, zero, 1
-;   blez a3, 0x1c
-;   and t5, a0, t0
+;   addi a1, zero, 0x40
+;   addi a3, zero, 1
+;   blez a1, 0x1c
+;   and t5, a3, t4
 ;   bne zero, t5, 0x14
 ;   addi a2, a2, 1
-;   addi a3, a3, -1
-;   slli a0, a0, 1
+;   addi a1, a1, -1
+;   slli a3, a3, 1
 ;   j -0x18
 ;   ori a6, zero, 0
 ;   addi a5, zero, 0x40
 ;   addi a4, zero, 1
 ;   blez a5, 0x1c
-;   and t5, a4, a1
+;   and t5, a4, a0
 ;   bne zero, t5, 0x14
 ;   addi a6, a6, 1
 ;   addi a5, a5, -1
 ;   slli a4, a4, 1
 ;   j -0x18
-;   addi t3, zero, 0x40
-;   beq t3, a2, 0xc
-;   ori t0, zero, 0
+;   beqz a0, 0xc
+;   ori t3, zero, 0
 ;   j 8
-;   ori t0, a6, 0
-;   add a0, a2, t0
+;   ori t3, a2, 0
+;   add a0, a6, t3
 ;   mv a1, zero
 ;   ret
 
@@ -814,7 +806,7 @@ block0(v0: i128):
 ;   add a0,a2,a6
 ;   li a1,0
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori t3, a0, 0
@@ -855,7 +847,7 @@ block0(v0: i64):
 ;   mv a2,a0
 ;   popcnt a0,a2##ty=i64 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -883,7 +875,7 @@ block0(v0: i32):
 ;   mv a2,a0
 ;   popcnt a0,a2##ty=i32 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -911,7 +903,7 @@ block0(v0: i16):
 ;   mv a2,a0
 ;   popcnt a0,a2##ty=i16 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -939,7 +931,7 @@ block0(v0: i8):
 ;   mv a2,a0
 ;   popcnt a0,a2##ty=i8 tmp=t2 step=a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a2, a0, 0
@@ -966,7 +958,7 @@ block0(v0: i32):
 ; block0:
 ;   not a0,a0
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a0, a0
@@ -982,7 +974,7 @@ block0(v0: i64):
 ; block0:
 ;   not a0,a0
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a0, a0
@@ -1001,7 +993,7 @@ block0(v0: i64):
 ;   slli a0,a0,3
 ;   not a0,a0
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli a0, a0, 3
@@ -1019,7 +1011,7 @@ block0(v0: i128):
 ;   not a0,a0
 ;   not a1,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a0, a0
@@ -1036,7 +1028,7 @@ block0(v0: i32, v1: i32):
 ; block0:
 ;   and a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   and a0, a0, a1
@@ -1052,7 +1044,7 @@ block0(v0: i64, v1: i64):
 ; block0:
 ;   and a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   and a0, a0, a1
@@ -1069,7 +1061,7 @@ block0(v0: i128, v1: i128):
 ;   and a0,a0,a2
 ;   and a1,a1,a3
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   and a0, a0, a2
@@ -1087,7 +1079,7 @@ block0(v0: i64):
 ; block0:
 ;   andi a0,a0,3
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   andi a0, a0, 3
@@ -1104,7 +1096,7 @@ block0(v0: i64):
 ; block0:
 ;   andi a0,a0,3
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   andi a0, a0, 3
@@ -1123,7 +1115,7 @@ block0(v0: i64, v1: i64):
 ;   slli a1,a1,3
 ;   and a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli a1, a1, 3
@@ -1143,7 +1135,7 @@ block0(v0: i64, v1: i64):
 ;   slli a1,a1,3
 ;   and a0,a1,a0
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli a1, a1, 3
@@ -1160,7 +1152,7 @@ block0(v0: i32, v1: i32):
 ; block0:
 ;   or a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   or a0, a0, a1
@@ -1176,7 +1168,7 @@ block0(v0: i64, v1: i64):
 ; block0:
 ;   or a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   or a0, a0, a1
@@ -1193,7 +1185,7 @@ block0(v0: i128, v1: i128):
 ;   or a0,a0,a2
 ;   or a1,a1,a3
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   or a0, a0, a2
@@ -1211,7 +1203,7 @@ block0(v0: i64):
 ; block0:
 ;   ori a0,a0,3
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a0, a0, 3
@@ -1228,7 +1220,7 @@ block0(v0: i64):
 ; block0:
 ;   ori a0,a0,3
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   ori a0, a0, 3
@@ -1247,7 +1239,7 @@ block0(v0: i64, v1: i64):
 ;   slli a1,a1,3
 ;   or a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli a1, a1, 3
@@ -1267,7 +1259,7 @@ block0(v0: i64, v1: i64):
 ;   slli a1,a1,3
 ;   or a0,a1,a0
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli a1, a1, 3
@@ -1284,7 +1276,7 @@ block0(v0: i32, v1: i32):
 ; block0:
 ;   xor a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   xor a0, a0, a1
@@ -1300,7 +1292,7 @@ block0(v0: i64, v1: i64):
 ; block0:
 ;   xor a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   xor a0, a0, a1
@@ -1317,7 +1309,7 @@ block0(v0: i128, v1: i128):
 ;   xor a0,a0,a2
 ;   xor a1,a1,a3
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   xor a0, a0, a2
@@ -1335,7 +1327,7 @@ block0(v0: i64):
 ; block0:
 ;   xori a0,a0,3
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   xori a0, a0, 3
@@ -1352,7 +1344,7 @@ block0(v0: i64):
 ; block0:
 ;   xori a0,a0,3
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   xori a0, a0, 3
@@ -1371,7 +1363,7 @@ block0(v0: i64, v1: i64):
 ;   slli a1,a1,3
 ;   xor a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli a1, a1, 3
@@ -1391,7 +1383,7 @@ block0(v0: i64, v1: i64):
 ;   slli a1,a1,3
 ;   xor a0,a1,a0
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli a1, a1, 3
@@ -1409,7 +1401,7 @@ block0(v0: i32, v1: i32):
 ;   not a1,a1
 ;   and a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a1, a1
@@ -1427,7 +1419,7 @@ block0(v0: i64, v1: i64):
 ;   not a1,a1
 ;   and a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a1, a1
@@ -1447,7 +1439,7 @@ block0(v0: i128, v1: i128):
 ;   and a0,a0,a4
 ;   and a1,a1,a6
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a4, a2
@@ -1466,15 +1458,15 @@ block0(v0: i64):
 ; VCode:
 ; block0:
 ;   li a1,4
-;   not a2,a1
-;   and a0,a0,a2
+;   not a1,a1
+;   and a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   addi a1, zero, 4
-;   not a2, a1
-;   and a0, a0, a2
+;   not a1, a1
+;   and a0, a0, a1
 ;   ret
 
 function %band_not_i64_constant_shift(i64, i64) -> i64 {
@@ -1491,7 +1483,7 @@ block0(v0: i64, v1: i64):
 ;   not a2,a2
 ;   and a0,a0,a2
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli a2, a1, 4
@@ -1510,7 +1502,7 @@ block0(v0: i32, v1: i32):
 ;   not a1,a1
 ;   or a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a1, a1
@@ -1528,7 +1520,7 @@ block0(v0: i64, v1: i64):
 ;   not a1,a1
 ;   or a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a1, a1
@@ -1548,7 +1540,7 @@ block0(v0: i128, v1: i128):
 ;   or a0,a0,a4
 ;   or a1,a1,a6
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a4, a2
@@ -1567,15 +1559,15 @@ block0(v0: i64):
 ; VCode:
 ; block0:
 ;   li a1,4
-;   not a2,a1
-;   or a0,a0,a2
+;   not a1,a1
+;   or a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   addi a1, zero, 4
-;   not a2, a1
-;   or a0, a0, a2
+;   not a1, a1
+;   or a0, a0, a1
 ;   ret
 
 function %bor_not_i64_constant_shift(i64, i64) -> i64 {
@@ -1592,7 +1584,7 @@ block0(v0: i64, v1: i64):
 ;   not a2,a2
 ;   or a0,a0,a2
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli a2, a1, 4
@@ -1611,7 +1603,7 @@ block0(v0: i32, v1: i32):
 ;   not a1,a1
 ;   xor a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a1, a1
@@ -1629,7 +1621,7 @@ block0(v0: i64, v1: i64):
 ;   not a1,a1
 ;   xor a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a1, a1
@@ -1649,7 +1641,7 @@ block0(v0: i128, v1: i128):
 ;   xor a0,a0,a4
 ;   xor a1,a1,a6
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   not a4, a2
@@ -1668,15 +1660,15 @@ block0(v0: i64):
 ; VCode:
 ; block0:
 ;   li a1,4
-;   not a2,a1
-;   xor a0,a0,a2
+;   not a1,a1
+;   xor a0,a0,a1
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   addi a1, zero, 4
-;   not a2, a1
-;   xor a0, a0, a2
+;   not a1, a1
+;   xor a0, a0, a1
 ;   ret
 
 function %bxor_not_i64_constant_shift(i64, i64) -> i64 {
@@ -1693,7 +1685,7 @@ block0(v0: i64, v1: i64):
 ;   not a2,a2
 ;   xor a0,a0,a2
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   slli a2, a1, 4
@@ -1722,7 +1714,7 @@ block0(v0: i128, v1: i8):
 ;   select_reg a0,zero,a7##condition=(a6 uge a4)
 ;   select_reg a1,a7,a3##condition=(a6 uge a4)
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   andi a3, a2, 0x3f
@@ -1769,7 +1761,7 @@ block0(v0: i128, v1: i128):
 ;   select_reg a0,zero,t3##condition=(a7 uge a5)
 ;   select_reg a1,t3,a3##condition=(a7 uge a5)
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   andi a3, a2, 0x3f
@@ -1816,7 +1808,7 @@ block0(v0: i128, v1: i8):
 ;   select_reg a0,a5,a0##condition=(a6 uge a4)
 ;   select_reg a1,zero,a5##condition=(a6 uge a4)
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   andi a3, a2, 0x3f
@@ -1862,7 +1854,7 @@ block0(v0: i128, v1: i128):
 ;   select_reg a0,a6,a5##condition=(a7 uge a4)
 ;   select_reg a1,zero,a6##condition=(a7 uge a4)
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   andi a3, a2, 0x3f
@@ -1912,7 +1904,7 @@ block0(v0: i128, v1: i8):
 ;   select_reg a0,a4,a0##condition=(t2 uge t0)
 ;   select_reg a1,t3,a4##condition=(t2 uge t0)
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   andi a3, a2, 0x3f
@@ -1967,7 +1959,7 @@ block0(v0: i128, v1: i128):
 ;   select_reg a0,a5,a4##condition=(a1 uge t1)
 ;   select_reg a1,t4,a5##condition=(a1 uge t1)
 ;   ret
-; 
+;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   andi a3, a2, 0x3f

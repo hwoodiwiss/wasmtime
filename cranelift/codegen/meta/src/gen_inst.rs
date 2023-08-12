@@ -1,5 +1,6 @@
 //! Generate instruction data (including opcodes, formats, builders, etc.).
 use std::fmt;
+use std::rc::Rc;
 
 use cranelift_codegen_shared::constant_hash;
 
@@ -17,7 +18,7 @@ use crate::unique_table::{UniqueSeqTable, UniqueTable};
 const TYPESET_LIMIT: usize = 0xff;
 
 /// Generate an instruction format enumeration.
-fn gen_formats(formats: &[&InstructionFormat], fmt: &mut Formatter) {
+fn gen_formats(formats: &[Rc<InstructionFormat>], fmt: &mut Formatter) {
     fmt.doc_comment(
         r#"
         An instruction format
@@ -65,7 +66,7 @@ fn gen_formats(formats: &[&InstructionFormat], fmt: &mut Formatter) {
 /// Every variant must contain an `opcode` field. The size of `InstructionData` should be kept at
 /// 16 bytes on 64-bit architectures. If more space is needed to represent an instruction, use a
 /// `ValueList` to store the additional information out of line.
-fn gen_instruction_data(formats: &[&InstructionFormat], fmt: &mut Formatter) {
+fn gen_instruction_data(formats: &[Rc<InstructionFormat>], fmt: &mut Formatter) {
     fmt.line("#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]");
     fmt.line(r#"#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]"#);
     fmt.line("#[allow(missing_docs)]");
@@ -104,7 +105,7 @@ fn gen_instruction_data(formats: &[&InstructionFormat], fmt: &mut Formatter) {
     fmt.line("}");
 }
 
-fn gen_arguments_method(formats: &[&InstructionFormat], fmt: &mut Formatter, is_mut: bool) {
+fn gen_arguments_method(formats: &[Rc<InstructionFormat>], fmt: &mut Formatter, is_mut: bool) {
     let (method, mut_, rslice, as_slice) = if is_mut {
         (
             "arguments_mut",
@@ -172,7 +173,7 @@ fn gen_arguments_method(formats: &[&InstructionFormat], fmt: &mut Formatter, is_
 /// - `pub fn arguments_mut(&mut self, &pool) -> &mut [Value]`
 /// - `pub fn eq(&self, &other: Self, &pool) -> bool`
 /// - `pub fn hash<H: Hasher>(&self, state: &mut H, &pool)`
-fn gen_instruction_data_impl(formats: &[&InstructionFormat], fmt: &mut Formatter) {
+fn gen_instruction_data_impl(formats: &[Rc<InstructionFormat>], fmt: &mut Formatter) {
     fmt.line("impl InstructionData {");
     fmt.indent(|fmt| {
         fmt.doc_comment("Get the opcode of this instruction.");
@@ -602,7 +603,22 @@ fn gen_opcodes(all_inst: &AllInstructions, fmt: &mut Formatter) {
             "side_effects_idempotent",
             "Despite having side effects, is this instruction okay to GVN?",
             fmt,
-        )
+        );
+
+        // Generate an opcode list, for iterating over all known opcodes.
+        fmt.doc_comment("All cranelift opcodes.");
+        fmt.line("pub fn all() -> &'static [Opcode] {");
+        fmt.indent(|fmt| {
+            fmt.line("return &[");
+            for inst in all_inst {
+                fmt.indent(|fmt| {
+                    fmtln!(fmt, "Opcode::{},", inst.camel_name);
+                });
+            }
+            fmt.line("];");
+        });
+        fmt.line("}");
+        fmt.empty_line();
     });
     fmt.line("}");
     fmt.empty_line();
@@ -669,7 +685,7 @@ fn gen_opcodes(all_inst: &AllInstructions, fmt: &mut Formatter) {
 /// Each operand constraint is represented as a string, one of:
 /// - `Concrete(vt)`, where `vt` is a value type name.
 /// - `Free(idx)` where `idx` is an index into `type_sets`.
-/// - `Same`, `Lane`, `AsBool` for controlling typevar-derived constraints.
+/// - `Same`, `Lane`, `AsTruthy` for controlling typevar-derived constraints.
 fn get_constraint<'entries, 'table>(
     operand: &'entries Operand,
     ctrl_typevar: Option<&TypeVar>,
@@ -685,7 +701,7 @@ fn get_constraint<'entries, 'table>(
     if let Some(free_typevar) = type_var.free_typevar() {
         if ctrl_typevar.is_some() && free_typevar != *ctrl_typevar.unwrap() {
             assert!(type_var.base.is_none());
-            return format!("Free({})", type_sets.add(&type_var.get_raw_typeset()));
+            return format!("Free({})", type_sets.add(type_var.get_raw_typeset()));
         }
     }
 
@@ -778,7 +794,7 @@ fn gen_type_constraints(all_inst: &AllInstructions, fmt: &mut Formatter) {
     // constraint is represented as a string, one of:
     // - `Concrete(vt)`, where `vt` is a value type name.
     // - `Free(idx)` where `idx` is an index into `type_sets`.
-    // - `Same`, `Lane`, `AsBool` for controlling typevar-derived constraints.
+    // - `Same`, `Lane`, `AsTruthy` for controlling typevar-derived constraints.
     let mut operand_seqs = UniqueSeqTable::new();
 
     // Preload table with constraints for typical binops.
@@ -794,7 +810,7 @@ fn gen_type_constraints(all_inst: &AllInstructions, fmt: &mut Formatter) {
     fmt.indent(|fmt| {
         for inst in all_inst.iter() {
             let (ctrl_typevar, ctrl_typeset) = if let Some(poly) = &inst.polymorphic_info {
-                let index = type_sets.add(&*poly.ctrl_typevar.get_raw_typeset());
+                let index = type_sets.add(poly.ctrl_typevar.get_raw_typeset());
                 (Some(&poly.ctrl_typevar), index)
             } else {
                 (None, TYPESET_LIMIT)
@@ -842,7 +858,7 @@ fn gen_type_constraints(all_inst: &AllInstructions, fmt: &mut Formatter) {
                 .collect::<Vec<_>>()
                 .join(", ")));
             if let Some(poly) = &inst.polymorphic_info {
-                fmt.comment(format!("Polymorphic over {}", typeset_to_string(&poly.ctrl_typevar.get_raw_typeset())));
+                fmt.comment(format!("Polymorphic over {}", typeset_to_string(poly.ctrl_typevar.get_raw_typeset())));
             }
 
             // Compute the bit field encoding, c.f. instructions.rs.
@@ -1206,7 +1222,7 @@ enum IsleTarget {
 }
 
 fn gen_common_isle(
-    formats: &[&InstructionFormat],
+    formats: &[Rc<InstructionFormat>],
     instructions: &AllInstructions,
     fmt: &mut Formatter,
     isle_target: IsleTarget,
@@ -1654,7 +1670,7 @@ fn gen_common_isle(
 }
 
 fn gen_opt_isle(
-    formats: &[&InstructionFormat],
+    formats: &[Rc<InstructionFormat>],
     instructions: &AllInstructions,
     fmt: &mut Formatter,
 ) {
@@ -1662,7 +1678,7 @@ fn gen_opt_isle(
 }
 
 fn gen_lower_isle(
-    formats: &[&InstructionFormat],
+    formats: &[Rc<InstructionFormat>],
     instructions: &AllInstructions,
     fmt: &mut Formatter,
 ) {
@@ -1692,7 +1708,7 @@ fn gen_isle_enum(name: &str, mut variants: Vec<&str>, fmt: &mut Formatter) {
 /// Generate a Builder trait with methods for all instructions.
 fn gen_builder(
     instructions: &AllInstructions,
-    formats: &[&InstructionFormat],
+    formats: &[Rc<InstructionFormat>],
     fmt: &mut Formatter,
 ) {
     fmt.doc_comment(
@@ -1715,7 +1731,7 @@ fn gen_builder(
     fmt.line("pub trait InstBuilder<'f>: InstBuilderBase<'f> {");
     fmt.indent(|fmt| {
         for inst in instructions.iter() {
-            gen_inst_builder(inst, &*inst.format, fmt);
+            gen_inst_builder(inst, &inst.format, fmt);
             fmt.empty_line();
         }
         for (i, format) in formats.iter().enumerate() {
@@ -1729,7 +1745,7 @@ fn gen_builder(
 }
 
 pub(crate) fn generate(
-    formats: Vec<&InstructionFormat>,
+    formats: &[Rc<InstructionFormat>],
     all_inst: &AllInstructions,
     opcode_filename: &str,
     inst_builder_filename: &str,

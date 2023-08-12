@@ -48,13 +48,15 @@ impl FunctionWithIsa {
         // a supported one, so that the same fuzz input works across different build
         // configurations.
         let target = u.choose(isa::ALL_ARCHITECTURES)?;
-        let builder = isa::lookup_by_name(target).map_err(|_| arbitrary::Error::IncorrectFormat)?;
+        let mut builder =
+            isa::lookup_by_name(target).map_err(|_| arbitrary::Error::IncorrectFormat)?;
         let architecture = builder.triple().architecture;
 
         let mut gen = FuzzGen::new(u);
         let flags = gen
             .generate_flags(architecture)
             .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+        gen.set_isa_flags(&mut builder, IsaFlagGen::All)?;
         let isa = builder
             .finish(flags)
             .map_err(|_| arbitrary::Error::IncorrectFormat)?;
@@ -74,12 +76,7 @@ impl FunctionWithIsa {
             .map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
         let func = gen
-            .generate_func(
-                fname,
-                isa.triple().clone(),
-                usercalls,
-                ALLOWED_LIBCALLS.to_vec(),
-            )
+            .generate_func(fname, isa.clone(), usercalls, ALLOWED_LIBCALLS.to_vec())
             .map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
         Ok(FunctionWithIsa { isa, func })
@@ -103,10 +100,10 @@ impl<'a> Arbitrary<'a> for FunctionWithIsa {
 fuzz_target!(|func: FunctionWithIsa| {
     let FunctionWithIsa { mut func, isa } = func;
 
-    let cache_key_hash = icache::compute_cache_key(&*isa, &mut func);
+    let cache_key_hash = icache::compute_cache_key(&*isa, &func);
 
     let mut context = Context::for_function(func.clone());
-    let prev_stencil = match context.compile_stencil(&*isa) {
+    let prev_stencil = match context.compile_stencil(&*isa, &mut Default::default()) {
         Ok(stencil) => stencil,
         Err(_) => return,
     };
@@ -187,7 +184,7 @@ fuzz_target!(|func: FunctionWithIsa| {
         false
     };
 
-    let new_cache_key_hash = icache::compute_cache_key(&*isa, &mut func);
+    let new_cache_key_hash = icache::compute_cache_key(&*isa, &func);
 
     if expect_cache_hit {
         assert!(cache_key_hash == new_cache_key_hash);
@@ -197,7 +194,7 @@ fuzz_target!(|func: FunctionWithIsa| {
 
     context = Context::for_function(func.clone());
 
-    let after_mutation_result = match context.compile(&*isa) {
+    let after_mutation_result = match context.compile(&*isa, &mut Default::default()) {
         Ok(info) => info,
         Err(_) => return,
     };

@@ -1,14 +1,15 @@
 use crate::binemit::{Addend, Reloc};
+use crate::ir;
 use crate::ir::immediates::{Ieee32, Ieee64};
 use crate::ir::TrapCode;
-use crate::ir::{KnownSymbol, LibCall};
-use crate::isa::x64::encoding::evex::{EvexInstruction, EvexVectorLength};
+use crate::ir::{KnownSymbol, LibCall, MemFlags};
+use crate::isa::x64::encoding::evex::{EvexInstruction, EvexVectorLength, RegisterOrAmode};
 use crate::isa::x64::encoding::rex::{
     emit_simm, emit_std_enc_enc, emit_std_enc_mem, emit_std_reg_mem, emit_std_reg_reg, int_reg_enc,
     low8_will_sign_extend_to_32, low8_will_sign_extend_to_64, reg_enc, LegacyPrefixes, OpcodeMap,
     RexFlags,
 };
-use crate::isa::x64::encoding::vex::{RegisterOrAmode, VexInstruction, VexVectorLength};
+use crate::isa::x64::encoding::vex::{VexInstruction, VexVectorLength};
 use crate::isa::x64::inst::args::*;
 use crate::isa::x64::inst::*;
 use crate::machinst::{inst_common, MachBuffer, MachInstEmit, MachLabel, Reg, Writable};
@@ -122,6 +123,7 @@ pub(crate) fn emit(
             InstructionSet::BMI2 => info.isa_flags.has_bmi2(),
             InstructionSet::FMA => info.isa_flags.has_fma(),
             InstructionSet::AVX => info.isa_flags.has_avx(),
+            InstructionSet::AVX2 => info.isa_flags.has_avx2(),
             InstructionSet::AVX512BITALG => info.isa_flags.has_avx512bitalg(),
             InstructionSet::AVX512DQ => info.isa_flags.has_avx512dq(),
             InstructionSet::AVX512F => info.isa_flags.has_avx512f(),
@@ -153,35 +155,69 @@ pub(crate) fn emit(
             debug_assert_eq!(src1, reg_g);
             let src2 = src2.clone().to_reg_mem_imm().with_allocs(allocs);
 
-            let rex = RexFlags::from(*size);
+            let prefix = if *size == OperandSize::Size16 {
+                LegacyPrefixes::_66
+            } else {
+                LegacyPrefixes::None
+            };
+
+            let mut rex = RexFlags::from(*size);
             if *op == AluRmiROpcode::Mul {
                 // We kinda freeloaded Mul into RMI_R_Op, but it doesn't fit the usual pattern, so
                 // we have to special-case it.
-                match src2 {
-                    RegMemImm::Reg { reg: reg_e } => {
-                        emit_std_reg_reg(sink, LegacyPrefixes::None, 0x0FAF, 2, reg_g, reg_e, rex);
-                    }
+                if *size == OperandSize::Size8 {
+                    match src2 {
+                        RegMemImm::Reg { reg: reg_e } => {
+                            debug_assert!(reg_e.is_real());
+                            rex.always_emit_if_8bit_needed(reg_e);
+                            let enc_e = int_reg_enc(reg_e);
+                            emit_std_enc_enc(sink, LegacyPrefixes::None, 0xF6, 1, 5, enc_e, rex);
+                        }
 
-                    RegMemImm::Mem { addr } => {
-                        let amode = addr.finalize(state, sink);
-                        emit_std_reg_mem(
-                            sink,
-                            LegacyPrefixes::None,
-                            0x0FAF,
-                            2,
-                            reg_g,
-                            &amode,
-                            rex,
-                            0,
-                        );
-                    }
+                        RegMemImm::Mem { addr } => {
+                            let amode = addr.finalize(state, sink);
+                            emit_std_enc_mem(
+                                sink,
+                                LegacyPrefixes::None,
+                                0xF6,
+                                1,
+                                5,
+                                &amode,
+                                rex,
+                                0,
+                            );
+                        }
 
-                    RegMemImm::Imm { simm32 } => {
-                        let use_imm8 = low8_will_sign_extend_to_32(simm32);
-                        let opcode = if use_imm8 { 0x6B } else { 0x69 };
-                        // Yes, really, reg_g twice.
-                        emit_std_reg_reg(sink, LegacyPrefixes::None, opcode, 1, reg_g, reg_g, rex);
-                        emit_simm(sink, if use_imm8 { 1 } else { 4 }, simm32);
+                        RegMemImm::Imm { .. } => {
+                            panic!("Cannot emit 8bit imul with 8bit immediate");
+                        }
+                    }
+                } else {
+                    match src2 {
+                        RegMemImm::Reg { reg: reg_e } => {
+                            emit_std_reg_reg(sink, prefix, 0x0FAF, 2, reg_g, reg_e, rex);
+                        }
+
+                        RegMemImm::Mem { addr } => {
+                            let amode = addr.finalize(state, sink);
+                            emit_std_reg_mem(sink, prefix, 0x0FAF, 2, reg_g, &amode, rex, 0);
+                        }
+
+                        RegMemImm::Imm { simm32 } => {
+                            let imm_size = if low8_will_sign_extend_to_32(simm32) {
+                                1
+                            } else {
+                                if *size == OperandSize::Size16 {
+                                    2
+                                } else {
+                                    4
+                                }
+                            };
+                            let opcode = if imm_size == 1 { 0x6B } else { 0x69 };
+                            // Yes, really, reg_g twice.
+                            emit_std_reg_reg(sink, prefix, opcode, 1, reg_g, reg_g, rex);
+                            emit_simm(sink, imm_size, simm32);
+                        }
                     }
                 }
             } else {
@@ -196,52 +232,63 @@ pub(crate) fn emit(
                     AluRmiROpcode::Mul => panic!("unreachable"),
                 };
 
+                let (opcode_r, opcode_m) = if *size == OperandSize::Size8 {
+                    (opcode_r - 1, opcode_m - 1)
+                } else {
+                    (opcode_r, opcode_m)
+                };
+
+                if *size == OperandSize::Size8 {
+                    debug_assert!(reg_g.is_real());
+                    rex.always_emit_if_8bit_needed(reg_g);
+                }
+
                 match src2 {
                     RegMemImm::Reg { reg: reg_e } => {
+                        if *size == OperandSize::Size8 {
+                            debug_assert!(reg_e.is_real());
+                            rex.always_emit_if_8bit_needed(reg_e);
+                        }
+
                         // GCC/llvm use the swapped operand encoding (viz., the R/RM vs RM/R
                         // duality). Do this too, so as to be able to compare generated machine
                         // code easily.
-                        emit_std_reg_reg(
-                            sink,
-                            LegacyPrefixes::None,
-                            opcode_r,
-                            1,
-                            reg_e,
-                            reg_g,
-                            rex,
-                        );
+                        emit_std_reg_reg(sink, prefix, opcode_r, 1, reg_e, reg_g, rex);
                     }
 
                     RegMemImm::Mem { addr } => {
                         let amode = addr.finalize(state, sink);
                         // Here we revert to the "normal" G-E ordering.
-                        emit_std_reg_mem(
-                            sink,
-                            LegacyPrefixes::None,
-                            opcode_m,
-                            1,
-                            reg_g,
-                            &amode,
-                            rex,
-                            0,
-                        );
+                        emit_std_reg_mem(sink, prefix, opcode_m, 1, reg_g, &amode, rex, 0);
                     }
 
                     RegMemImm::Imm { simm32 } => {
-                        let use_imm8 = low8_will_sign_extend_to_32(simm32);
-                        let opcode = if use_imm8 { 0x83 } else { 0x81 };
+                        let imm_size = if *size == OperandSize::Size8 {
+                            1
+                        } else {
+                            if low8_will_sign_extend_to_32(simm32) {
+                                1
+                            } else {
+                                if *size == OperandSize::Size16 {
+                                    2
+                                } else {
+                                    4
+                                }
+                            }
+                        };
+
+                        let opcode = if *size == OperandSize::Size8 {
+                            0x80
+                        } else if low8_will_sign_extend_to_32(simm32) {
+                            0x83
+                        } else {
+                            0x81
+                        };
+
                         // And also here we use the "normal" G-E ordering.
                         let enc_g = int_reg_enc(reg_g);
-                        emit_std_enc_enc(
-                            sink,
-                            LegacyPrefixes::None,
-                            opcode,
-                            1,
-                            subopcode_i,
-                            enc_g,
-                            rex,
-                        );
-                        emit_simm(sink, if use_imm8 { 1 } else { 4 }, simm32);
+                        emit_std_enc_enc(sink, prefix, opcode, 1, subopcode_i, enc_g, rex);
+                        emit_simm(sink, imm_size, simm32);
                     }
                 }
             }
@@ -273,7 +320,6 @@ pub(crate) fn emit(
             let src2 = allocs.next(src2.to_reg());
             let src1_dst = src1_dst.finalize(state, sink).with_allocs(allocs);
 
-            assert!(*size == OperandSize::Size32 || *size == OperandSize::Size64);
             let opcode = match op {
                 AluRmiROpcode::Add => 0x01,
                 AluRmiROpcode::Sub => 0x29,
@@ -282,17 +328,26 @@ pub(crate) fn emit(
                 AluRmiROpcode::Xor => 0x31,
                 _ => panic!("Unsupported read-modify-write ALU opcode"),
             };
+
+            let prefix = if *size == OperandSize::Size16 {
+                LegacyPrefixes::_66
+            } else {
+                LegacyPrefixes::None
+            };
+            let opcode = if *size == OperandSize::Size8 {
+                opcode - 1
+            } else {
+                opcode
+            };
+
+            let mut rex = RexFlags::from(*size);
+            if *size == OperandSize::Size8 {
+                debug_assert!(src2.is_real());
+                rex.always_emit_if_8bit_needed(src2);
+            }
+
             let enc_g = int_reg_enc(src2);
-            emit_std_enc_mem(
-                sink,
-                LegacyPrefixes::None,
-                opcode,
-                1,
-                enc_g,
-                &src1_dst,
-                RexFlags::from(*size),
-                0,
-            );
+            emit_std_enc_mem(sink, prefix, opcode, 1, enc_g, &src1_dst, rex, 0);
         }
 
         Inst::AluRmRVex {
@@ -365,6 +420,31 @@ pub(crate) fn emit(
             }
         }
 
+        Inst::UnaryRmRVex { size, op, src, dst } => {
+            let dst = allocs.next(dst.to_reg().to_reg());
+            let src = match src.clone().to_reg_mem().with_allocs(allocs) {
+                RegMem::Reg { reg } => {
+                    RegisterOrAmode::Register(reg.to_real_reg().unwrap().hw_enc().into())
+                }
+                RegMem::Mem { addr } => RegisterOrAmode::Amode(addr.finalize(state, sink)),
+            };
+
+            let (opcode, opcode_ext) = match op {
+                UnaryRmRVexOpcode::Blsr => (0xF3, 1),
+                UnaryRmRVexOpcode::Blsmsk => (0xF3, 2),
+                UnaryRmRVexOpcode::Blsi => (0xF3, 3),
+            };
+
+            VexInstruction::new()
+                .map(OpcodeMap::_0F38)
+                .w(*size == OperandSize::Size64)
+                .opcode(opcode)
+                .reg(opcode_ext)
+                .vvvv(dst.to_real_reg().unwrap().hw_enc())
+                .rm(src)
+                .encode(sink);
+        }
+
         Inst::Not { size, src, dst } => {
             let src = allocs.next(src.to_reg());
             let dst = allocs.next(dst.to_reg().to_reg());
@@ -400,24 +480,46 @@ pub(crate) fn emit(
         }
 
         Inst::Div {
-            size,
-            signed,
-            dividend_lo,
-            dividend_hi,
+            sign,
+            trap,
             divisor,
-            dst_quotient,
-            dst_remainder,
+            ..
+        }
+        | Inst::Div8 {
+            sign,
+            trap,
+            divisor,
+            ..
         } => {
-            let dividend_lo = allocs.next(dividend_lo.to_reg());
-            let dst_quotient = allocs.next(dst_quotient.to_reg().to_reg());
-            debug_assert_eq!(dividend_lo, regs::rax());
-            debug_assert_eq!(dst_quotient, regs::rax());
-            if size.to_bits() > 8 {
-                let dst_remainder = allocs.next(dst_remainder.to_reg().to_reg());
-                debug_assert_eq!(dst_remainder, regs::rdx());
-                let dividend_hi = allocs.next(dividend_hi.to_reg());
-                debug_assert_eq!(dividend_hi, regs::rdx());
-            }
+            let divisor = divisor.clone().to_reg_mem().with_allocs(allocs);
+            let size = match inst {
+                Inst::Div {
+                    size,
+                    dividend_lo,
+                    dividend_hi,
+                    dst_quotient,
+                    dst_remainder,
+                    ..
+                } => {
+                    let dividend_lo = allocs.next(dividend_lo.to_reg());
+                    let dividend_hi = allocs.next(dividend_hi.to_reg());
+                    let dst_quotient = allocs.next(dst_quotient.to_reg().to_reg());
+                    let dst_remainder = allocs.next(dst_remainder.to_reg().to_reg());
+                    debug_assert_eq!(dividend_lo, regs::rax());
+                    debug_assert_eq!(dividend_hi, regs::rdx());
+                    debug_assert_eq!(dst_quotient, regs::rax());
+                    debug_assert_eq!(dst_remainder, regs::rdx());
+                    *size
+                }
+                Inst::Div8 { dividend, dst, .. } => {
+                    let dividend = allocs.next(dividend.to_reg());
+                    let dst = allocs.next(dst.to_reg().to_reg());
+                    debug_assert_eq!(dividend, regs::rax());
+                    debug_assert_eq!(dst, regs::rax());
+                    OperandSize::Size8
+                }
+                _ => unreachable!(),
+            };
 
             let (opcode, prefix) = match size {
                 OperandSize::Size8 => (0xF6, LegacyPrefixes::None),
@@ -426,12 +528,14 @@ pub(crate) fn emit(
                 OperandSize::Size64 => (0xF7, LegacyPrefixes::None),
             };
 
-            sink.add_trap(TrapCode::IntegerDivisionByZero);
+            sink.add_trap(*trap);
 
-            let subopcode = if *signed { 7 } else { 6 };
-            match divisor.clone().to_reg_mem() {
+            let subopcode = match sign {
+                DivSignedness::Signed => 7,
+                DivSignedness::Unsigned => 6,
+            };
+            match divisor {
                 RegMem::Reg { reg } => {
-                    let reg = allocs.next(reg);
                     let src = int_reg_enc(reg);
                     emit_std_enc_enc(
                         sink,
@@ -440,11 +544,11 @@ pub(crate) fn emit(
                         1,
                         subopcode,
                         src,
-                        RexFlags::from((*size, reg)),
+                        RexFlags::from((size, reg)),
                     )
                 }
                 RegMem::Mem { addr: src } => {
-                    let amode = src.finalize(state, sink).with_allocs(allocs);
+                    let amode = src.finalize(state, sink);
                     emit_std_enc_mem(
                         sink,
                         prefix,
@@ -452,7 +556,7 @@ pub(crate) fn emit(
                         1,
                         subopcode,
                         &amode,
-                        RexFlags::from(*size),
+                        RexFlags::from(size),
                         0,
                     );
                 }
@@ -496,6 +600,45 @@ pub(crate) fn emit(
             }
         }
 
+        Inst::UMulLo {
+            size,
+            src1,
+            src2,
+            dst,
+        } => {
+            let src1 = allocs.next(src1.to_reg());
+            let dst = allocs.next(dst.to_reg().to_reg());
+            debug_assert_eq!(src1, regs::rax());
+            debug_assert_eq!(dst, regs::rax());
+
+            let mut rex = RexFlags::from(*size);
+            let prefix = match size {
+                OperandSize::Size16 => LegacyPrefixes::_66,
+                _ => LegacyPrefixes::None,
+            };
+
+            let opcode = if *size == OperandSize::Size8 {
+                0xF6
+            } else {
+                0xF7
+            };
+
+            match src2.clone().to_reg_mem() {
+                RegMem::Reg { reg } => {
+                    let reg = allocs.next(reg);
+                    if *size == OperandSize::Size8 {
+                        rex.always_emit_if_8bit_needed(reg);
+                    }
+                    let reg_e = int_reg_enc(reg);
+                    emit_std_enc_enc(sink, prefix, opcode, 1, 4, reg_e, rex);
+                }
+                RegMem::Mem { addr: src } => {
+                    let amode = src.finalize(state, sink).with_allocs(allocs);
+                    emit_std_enc_mem(sink, prefix, opcode, 1, 4, &amode, rex, 0);
+                }
+            }
+        }
+
         Inst::SignExtendData { size, src, dst } => {
             let src = allocs.next(src.to_reg());
             let dst = allocs.next(dst.to_reg().to_reg());
@@ -522,164 +665,102 @@ pub(crate) fn emit(
             }
         }
 
-        Inst::CheckedDivOrRemSeq {
-            kind,
-            size,
-            dividend_lo,
-            dividend_hi,
-            divisor,
-            tmp,
-            dst_quotient,
-            dst_remainder,
-        } => {
-            let dividend_lo = allocs.next(dividend_lo.to_reg());
-            let dividend_hi = allocs.next(dividend_hi.to_reg());
+        Inst::CheckedSRemSeq { divisor, .. } | Inst::CheckedSRemSeq8 { divisor, .. } => {
             let divisor = allocs.next(divisor.to_reg());
-            let dst_quotient = allocs.next(dst_quotient.to_reg().to_reg());
-            let dst_remainder = allocs.next(dst_remainder.to_reg().to_reg());
-            let tmp = tmp.map(|tmp| allocs.next(tmp.to_reg().to_reg()));
-            debug_assert_eq!(dividend_lo, regs::rax());
-            debug_assert_eq!(dividend_hi, regs::rdx());
-            debug_assert_eq!(dst_quotient, regs::rax());
-            debug_assert_eq!(dst_remainder, regs::rdx());
+
+            // Validate that the register constraints of the dividend and the
+            // destination are all as expected.
+            let (dst, size) = match inst {
+                Inst::CheckedSRemSeq {
+                    dividend_lo,
+                    dividend_hi,
+                    dst_quotient,
+                    dst_remainder,
+                    size,
+                    ..
+                } => {
+                    let dividend_lo = allocs.next(dividend_lo.to_reg());
+                    let dividend_hi = allocs.next(dividend_hi.to_reg());
+                    let dst_quotient = allocs.next(dst_quotient.to_reg().to_reg());
+                    let dst_remainder = allocs.next(dst_remainder.to_reg().to_reg());
+                    debug_assert_eq!(dividend_lo, regs::rax());
+                    debug_assert_eq!(dividend_hi, regs::rdx());
+                    debug_assert_eq!(dst_quotient, regs::rax());
+                    debug_assert_eq!(dst_remainder, regs::rdx());
+                    (regs::rdx(), *size)
+                }
+                Inst::CheckedSRemSeq8 { dividend, dst, .. } => {
+                    let dividend = allocs.next(dividend.to_reg());
+                    let dst = allocs.next(dst.to_reg().to_reg());
+                    debug_assert_eq!(dividend, regs::rax());
+                    debug_assert_eq!(dst, regs::rax());
+                    (regs::rax(), OperandSize::Size8)
+                }
+                _ => unreachable!(),
+            };
 
             // Generates the following code sequence:
             //
-            // ;; check divide by zero:
-            // cmp 0 %divisor
-            // jnz $after_trap
-            // ud2
-            // $after_trap:
-            //
-            // ;; for signed modulo/div:
             // cmp -1 %divisor
             // jnz $do_op
-            // ;;   for signed modulo, result is 0
-            //    mov #0, %rdx
-            //    j $done
-            // ;;   for signed div, check for integer overflow against INT_MIN of the right size
-            // cmp INT_MIN, %rax
-            // jnz $do_op
-            // ud2
+            //
+            // ;; for srem, result is 0
+            // mov #0, %dst
+            // j $done
             //
             // $do_op:
-            // ;; if signed
-            //     cdq ;; sign-extend from rax into rdx
-            // ;; else
-            //     mov #0, %rdx
             // idiv %divisor
             //
             // $done:
 
-            // Check if the divisor is zero, first.
-            let inst = Inst::cmp_rmi_r(*size, RegMemImm::imm(0), divisor);
+            let do_op = sink.get_label();
+            let done_label = sink.get_label();
+
+            // Check if the divisor is -1, and if it isn't then immediately
+            // go to the `idiv`.
+            let inst = Inst::cmp_rmi_r(size, RegMemImm::imm(0xffffffff), divisor);
+            inst.emit(&[], sink, info, state);
+            one_way_jmp(sink, CC::NZ, do_op);
+
+            // ... otherwise the divisor is -1 and the result is always 0. This
+            // is written to the destination register which will be %rax for
+            // 8-bit srem and %rdx otherwise.
+            //
+            // Note that for 16-to-64-bit srem operations this leaves the
+            // second destination, %rax, unchanged. This isn't semantically
+            // correct if a lowering actually tries to use the `dst_quotient`
+            // output but for srem only the `dst_remainder` output is used for
+            // now.
+            let inst = Inst::imm(OperandSize::Size64, 0, Writable::from_reg(dst));
+            inst.emit(&[], sink, info, state);
+            let inst = Inst::jmp_known(done_label);
             inst.emit(&[], sink, info, state);
 
-            let inst = Inst::trap_if(CC::Z, TrapCode::IntegerDivisionByZero);
-            inst.emit(&[], sink, info, state);
-
-            let (do_op, done_label) = if kind.is_signed() {
-                // Now check if the divisor is -1.
-                let inst = Inst::cmp_rmi_r(*size, RegMemImm::imm(0xffffffff), divisor);
-                inst.emit(&[], sink, info, state);
-                let do_op = sink.get_label();
-
-                // If not equal, jump to do-op.
-                one_way_jmp(sink, CC::NZ, do_op);
-
-                // Here, divisor == -1.
-                if !kind.is_div() {
-                    // x % -1 = 0; put the result into the destination, $rax.
-                    let done_label = sink.get_label();
-
-                    let inst = Inst::imm(OperandSize::Size64, 0, Writable::from_reg(regs::rax()));
-                    inst.emit(&[], sink, info, state);
-
-                    let inst = Inst::jmp_known(done_label);
-                    inst.emit(&[], sink, info, state);
-
-                    (Some(do_op), Some(done_label))
-                } else {
-                    // Check for integer overflow.
-                    if *size == OperandSize::Size64 {
-                        let tmp = tmp.expect("temporary for i64 sdiv");
-
-                        let inst = Inst::imm(
-                            OperandSize::Size64,
-                            0x8000000000000000,
-                            Writable::from_reg(tmp),
-                        );
-                        inst.emit(&[], sink, info, state);
-
-                        let inst =
-                            Inst::cmp_rmi_r(OperandSize::Size64, RegMemImm::reg(tmp), regs::rax());
-                        inst.emit(&[], sink, info, state);
-                    } else {
-                        let inst = Inst::cmp_rmi_r(*size, RegMemImm::imm(0x80000000), regs::rax());
-                        inst.emit(&[], sink, info, state);
-                    }
-
-                    // If not equal, jump over the trap.
-                    let inst = Inst::trap_if(CC::Z, TrapCode::IntegerOverflow);
-                    inst.emit(&[], sink, info, state);
-
-                    (Some(do_op), None)
-                }
-            } else {
-                (None, None)
-            };
-
-            if let Some(do_op) = do_op {
-                sink.bind_label(do_op);
-            }
-
-            let dividend_lo = Gpr::new(regs::rax()).unwrap();
-            let dst_quotient = WritableGpr::from_reg(Gpr::new(regs::rax()).unwrap());
-            let (dividend_hi, dst_remainder) = if *size == OperandSize::Size8 {
-                (
+            // Here the `idiv` is executed, which is different depending on the
+            // size
+            sink.bind_label(do_op, state.ctrl_plane_mut());
+            let inst = match size {
+                OperandSize::Size8 => Inst::div8(
+                    DivSignedness::Signed,
+                    TrapCode::IntegerDivisionByZero,
+                    RegMem::reg(divisor),
                     Gpr::new(regs::rax()).unwrap(),
                     Writable::from_reg(Gpr::new(regs::rax()).unwrap()),
-                )
-            } else {
-                (
+                ),
+                _ => Inst::div(
+                    size,
+                    DivSignedness::Signed,
+                    TrapCode::IntegerDivisionByZero,
+                    RegMem::reg(divisor),
+                    Gpr::new(regs::rax()).unwrap(),
                     Gpr::new(regs::rdx()).unwrap(),
+                    Writable::from_reg(Gpr::new(regs::rax()).unwrap()),
                     Writable::from_reg(Gpr::new(regs::rdx()).unwrap()),
-                )
+                ),
             };
-
-            // Fill in the high parts:
-            if kind.is_signed() {
-                // sign-extend the sign-bit of rax into rdx, for signed opcodes.
-                let inst =
-                    Inst::sign_extend_data(*size, dividend_lo, WritableGpr::from_reg(dividend_hi));
-                inst.emit(&[], sink, info, state);
-            } else if *size != OperandSize::Size8 {
-                // zero for unsigned opcodes.
-                let inst = Inst::imm(
-                    OperandSize::Size64,
-                    0,
-                    Writable::from_reg(dividend_hi.to_reg()),
-                );
-                inst.emit(&[], sink, info, state);
-            }
-
-            let inst = Inst::div(
-                *size,
-                kind.is_signed(),
-                RegMem::reg(divisor),
-                dividend_lo,
-                dividend_hi,
-                dst_quotient,
-                dst_remainder,
-            );
             inst.emit(&[], sink, info, state);
 
-            // Lowering takes care of moving the result back into the right register, see comment
-            // there.
-
-            if let Some(done) = done_label {
-                sink.bind_label(done);
-            }
+            sink.bind_label(done_label, state.ctrl_plane_mut());
         }
 
         Inst::Imm {
@@ -871,20 +952,84 @@ pub(crate) fn emit(
             )
         }
 
-        Inst::LoadEffectiveAddress { addr, dst } => {
+        Inst::LoadEffectiveAddress { addr, dst, size } => {
             let dst = allocs.next(dst.to_reg().to_reg());
             let amode = addr.finalize(state, sink).with_allocs(allocs);
 
-            emit_std_reg_mem(
-                sink,
-                LegacyPrefixes::None,
-                0x8D,
-                1,
-                dst,
-                &amode,
-                RexFlags::set_w(),
-                0,
-            );
+            // If this `lea` can actually get encoded as an `add` then do that
+            // instead. Currently all candidate `iadd`s become an `lea`
+            // pseudo-instruction here but maximizing the sue of `lea` is not
+            // necessarily optimal. The `lea` instruction goes through dedicated
+            // address units on cores which are finite and disjoint from the
+            // general ALU, so if everything uses `lea` then those units can get
+            // saturated while leaving the ALU idle.
+            //
+            // To help make use of more parts of a cpu, this attempts to use
+            // `add` when it's semantically equivalent to `lea`, or otherwise
+            // when the `dst` register is the same as the `base` or `index`
+            // register.
+            //
+            // FIXME: ideally regalloc is informed of this constraint. Register
+            // allocation of `lea` should "attempt" to put the `base` in the
+            // same register as `dst` but not at the expense of generating a
+            // `mov` instruction. Currently that's not possible but perhaps one
+            // day it may be worth it.
+            match amode {
+                // If `base == dst` then this is `add $imm, %dst`, so encode
+                // that instead.
+                Amode::ImmReg {
+                    simm32,
+                    base,
+                    flags: _,
+                } if base == dst => {
+                    let inst = Inst::alu_rmi_r(
+                        *size,
+                        AluRmiROpcode::Add,
+                        RegMemImm::imm(simm32 as u32),
+                        Writable::from_reg(dst),
+                    );
+                    inst.emit(&[], sink, info, state);
+                }
+                // If the offset is 0 and the shift is 0 (meaning multiplication
+                // by 1) then:
+                //
+                // * If `base == dst`, then this is `add %index, %base`
+                // * If `index == dst`, then this is `add %base, %index`
+                //
+                // Encode the appropriate instruction here in that case.
+                Amode::ImmRegRegShift {
+                    simm32: 0,
+                    base,
+                    index,
+                    shift: 0,
+                    flags: _,
+                } if base == dst || index == dst => {
+                    let (dst, operand) = if base == dst {
+                        (base, index)
+                    } else {
+                        (index, base)
+                    };
+                    let inst = Inst::alu_rmi_r(
+                        *size,
+                        AluRmiROpcode::Add,
+                        RegMemImm::reg(operand.to_reg()),
+                        Writable::from_reg(dst.to_reg()),
+                    );
+                    inst.emit(&[], sink, info, state);
+                }
+
+                // If `lea`'s 3-operand mode is leveraged by regalloc, or if
+                // it's fancy like imm-plus-shift-plus-base, then `lea` is
+                // actually emitted.
+                _ => {
+                    let flags = match size {
+                        OperandSize::Size32 => RexFlags::clear_w(),
+                        OperandSize::Size64 => RexFlags::set_w(),
+                        _ => unreachable!(),
+                    };
+                    emit_std_reg_mem(sink, LegacyPrefixes::None, 0x8D, 1, dst, &amode, flags, 0);
+                }
+            };
         }
 
         Inst::MovsxRmR { ext_mode, src, dst } => {
@@ -1264,7 +1409,7 @@ pub(crate) fn emit(
             let inst = Inst::xmm_unary_rm_r(op, consequent, Writable::from_reg(dst));
             inst.emit(&[], sink, info, state);
 
-            sink.bind_label(next);
+            sink.bind_label(next, state.ctrl_plane_mut());
         }
 
         Inst::Push64 { src } => {
@@ -1368,7 +1513,7 @@ pub(crate) fn emit(
 
             // Emit the main loop!
             let loop_start = sink.get_label();
-            sink.bind_label(loop_start);
+            sink.bind_label(loop_start, state.ctrl_plane_mut());
 
             // sub  rsp, GUARD_SIZE
             let inst = Inst::alu_rmi_r(
@@ -1435,6 +1580,62 @@ pub(crate) fn emit(
             if call_info.opcode.is_call() {
                 sink.add_call_site(call_info.opcode);
             }
+
+            let callee_pop_size = i64::from(call_info.callee_pop_size);
+            state.adjust_virtual_sp_offset(-callee_pop_size);
+        }
+
+        Inst::ReturnCallKnown {
+            callee,
+            info: call_info,
+        } => {
+            emit_return_call_common_sequence(
+                allocs,
+                sink,
+                info,
+                state,
+                call_info.new_stack_arg_size,
+                call_info.old_stack_arg_size,
+                call_info.ret_addr,
+                call_info.fp,
+                call_info.tmp,
+                &call_info.uses,
+            );
+
+            // Finally, jump to the callee!
+            //
+            // Note: this is not `Inst::Jmp { .. }.emit(..)` because we have
+            // different metadata in this case: we don't have a label for the
+            // target, but rather a function relocation.
+            sink.put1(0xE9);
+            // The addend adjusts for the difference between the end of the instruction and the
+            // beginning of the immediate field.
+            emit_reloc(sink, Reloc::X86CallPCRel4, &callee, -4);
+            sink.put4(0);
+            sink.add_call_site(ir::Opcode::ReturnCall);
+        }
+
+        Inst::ReturnCallUnknown {
+            callee,
+            info: call_info,
+        } => {
+            let callee = callee.with_allocs(allocs);
+
+            emit_return_call_common_sequence(
+                allocs,
+                sink,
+                info,
+                state,
+                call_info.new_stack_arg_size,
+                call_info.old_stack_arg_size,
+                call_info.ret_addr,
+                call_info.fp,
+                call_info.tmp,
+                &call_info.uses,
+            );
+
+            Inst::JmpUnknown { target: callee }.emit(&[], sink, info, state);
+            sink.add_call_site(ir::Opcode::ReturnCallIndirect);
         }
 
         Inst::CallUnknown {
@@ -1479,11 +1680,24 @@ pub(crate) fn emit(
             if call_info.opcode.is_call() {
                 sink.add_call_site(call_info.opcode);
             }
+
+            let callee_pop_size = i64::from(call_info.callee_pop_size);
+            state.adjust_virtual_sp_offset(-callee_pop_size);
         }
 
         Inst::Args { .. } => {}
 
-        Inst::Ret { .. } => sink.put1(0xC3),
+        Inst::Ret {
+            stack_bytes_to_pop: 0,
+            ..
+        } => sink.put1(0xC3),
+
+        Inst::Ret {
+            stack_bytes_to_pop, ..
+        } => {
+            sink.put1(0xC2);
+            sink.put2(u16::try_from(*stack_bytes_to_pop).unwrap());
+        }
 
         Inst::JmpKnown { dst } => {
             let br_start = sink.cur_offset();
@@ -1639,7 +1853,7 @@ pub(crate) fn emit(
             inst.emit(&[], sink, info, state);
 
             // Emit jump table (table of 32-bit offsets).
-            sink.bind_label(start_of_jumptable);
+            sink.bind_label(start_of_jumptable, state.ctrl_plane_mut());
             let jt_off = sink.cur_offset();
             for &target in targets.iter().chain(std::iter::once(default_target)) {
                 let word_off = sink.cur_offset();
@@ -1654,16 +1868,8 @@ pub(crate) fn emit(
         }
 
         Inst::TrapIf { cc, trap_code } => {
-            let else_label = sink.get_label();
-
-            // Jump over if the invert of CC is set (i.e. CC is not set).
-            one_way_jmp(sink, cc.invert(), else_label);
-
-            // Trap!
-            let inst = Inst::trap(*trap_code);
-            inst.emit(&[], sink, info, state);
-
-            sink.bind_label(else_label);
+            let trap_label = sink.defer_trap(*trap_code, state.take_stack_map());
+            one_way_jmp(sink, *cc, trap_label);
         }
 
         Inst::TrapIfAnd {
@@ -1671,17 +1877,15 @@ pub(crate) fn emit(
             cc2,
             trap_code,
         } => {
+            let trap_label = sink.defer_trap(*trap_code, state.take_stack_map());
             let else_label = sink.get_label();
 
-            // Jump over if either condition code is not set.
+            // Jump to the end if the first condition isn't true, and then if
+            // the second condition is true go to the trap.
             one_way_jmp(sink, cc1.invert(), else_label);
-            one_way_jmp(sink, cc2.invert(), else_label);
+            one_way_jmp(sink, *cc2, trap_label);
 
-            // Trap!
-            let inst = Inst::trap(*trap_code);
-            inst.emit(&[], sink, info, state);
-
-            sink.bind_label(else_label);
+            sink.bind_label(else_label, state.ctrl_plane_mut());
         }
 
         Inst::TrapIfOr {
@@ -1689,19 +1893,11 @@ pub(crate) fn emit(
             cc2,
             trap_code,
         } => {
-            let trap_label = sink.get_label();
-            let else_label = sink.get_label();
+            let trap_label = sink.defer_trap(*trap_code, state.take_stack_map());
 
-            // trap immediately if cc1 is set, otherwise jump over the trap if cc2 is not.
+            // Emit two jumps to the same trap if either condition code is true.
             one_way_jmp(sink, *cc1, trap_label);
-            one_way_jmp(sink, cc2.invert(), else_label);
-
-            // Trap!
-            sink.bind_label(trap_label);
-            let inst = Inst::trap(*trap_code);
-            inst.emit(&[], sink, info, state);
-
-            sink.bind_label(else_label);
+            one_way_jmp(sink, *cc2, trap_label);
         }
 
         Inst::XmmUnaryRmR { op, src, dst } => {
@@ -1764,6 +1960,7 @@ pub(crate) fn emit(
                 SseOpcode::Sqrtpd => (LegacyPrefixes::_66, 0x0F51, 2),
                 SseOpcode::Sqrtss => (LegacyPrefixes::_F3, 0x0F51, 2),
                 SseOpcode::Sqrtsd => (LegacyPrefixes::_F2, 0x0F51, 2),
+                SseOpcode::Movddup => (LegacyPrefixes::_F2, 0x0F12, 2),
                 _ => unimplemented!("Opcode {:?} not implemented", op),
             };
 
@@ -1789,6 +1986,8 @@ pub(crate) fn emit(
                 SseOpcode::Roundpd => (LegacyPrefixes::_66, 0x0F3A09, 3),
                 SseOpcode::Roundsd => (LegacyPrefixes::_66, 0x0F3A0B, 3),
                 SseOpcode::Pshufd => (LegacyPrefixes::_66, 0x0F70, 2),
+                SseOpcode::Pshuflw => (LegacyPrefixes::_F2, 0x0F70, 2),
+                SseOpcode::Pshufhw => (LegacyPrefixes::_F3, 0x0F70, 2),
                 _ => unimplemented!("Opcode {:?} not implemented", op),
             };
             match src {
@@ -1806,7 +2005,12 @@ pub(crate) fn emit(
 
         Inst::XmmUnaryRmREvex { op, src, dst } => {
             let dst = allocs.next(dst.to_reg().to_reg());
-            let src = src.clone().to_reg_mem().with_allocs(allocs);
+            let src = match src.clone().to_reg_mem().with_allocs(allocs) {
+                RegMem::Reg { reg } => {
+                    RegisterOrAmode::Register(reg.to_real_reg().unwrap().hw_enc().into())
+                }
+                RegMem::Mem { addr } => RegisterOrAmode::Amode(addr.finalize(state, sink)),
+            };
 
             let (prefix, map, w, opcode) = match op {
                 Avx512Opcode::Vcvtudq2ps => (LegacyPrefixes::_F2, OpcodeMap::_0F, false, 0x7a),
@@ -1814,18 +2018,43 @@ pub(crate) fn emit(
                 Avx512Opcode::Vpopcntb => (LegacyPrefixes::_66, OpcodeMap::_0F38, false, 0x54),
                 _ => unimplemented!("Opcode {:?} not implemented", op),
             };
-            match src {
-                RegMem::Reg { reg: src } => EvexInstruction::new()
-                    .length(EvexVectorLength::V128)
-                    .prefix(prefix)
-                    .map(map)
-                    .w(w)
-                    .opcode(opcode)
-                    .reg(dst.to_real_reg().unwrap().hw_enc())
-                    .rm(src.to_real_reg().unwrap().hw_enc())
-                    .encode(sink),
-                _ => todo!(),
+            EvexInstruction::new()
+                .length(EvexVectorLength::V128)
+                .prefix(prefix)
+                .map(map)
+                .w(w)
+                .opcode(opcode)
+                .tuple_type(op.tuple_type())
+                .reg(dst.to_real_reg().unwrap().hw_enc())
+                .rm(src)
+                .encode(sink);
+        }
+
+        Inst::XmmUnaryRmRImmEvex { op, src, dst, imm } => {
+            let dst = allocs.next(dst.to_reg().to_reg());
+            let src = match src.clone().to_reg_mem().with_allocs(allocs) {
+                RegMem::Reg { reg } => {
+                    RegisterOrAmode::Register(reg.to_real_reg().unwrap().hw_enc().into())
+                }
+                RegMem::Mem { addr } => RegisterOrAmode::Amode(addr.finalize(state, sink)),
             };
+
+            let (opcode, opcode_ext, w) = match op {
+                Avx512Opcode::VpsraqImm => (0x72, 4, true),
+                _ => unimplemented!("Opcode {:?} not implemented", op),
+            };
+            EvexInstruction::new()
+                .length(EvexVectorLength::V128)
+                .prefix(LegacyPrefixes::_66)
+                .map(OpcodeMap::_0F)
+                .w(w)
+                .opcode(opcode)
+                .reg(opcode_ext)
+                .vvvvv(dst.to_real_reg().unwrap().hw_enc())
+                .tuple_type(op.tuple_type())
+                .rm(src)
+                .imm(*imm)
+                .encode(sink);
         }
 
         Inst::XmmRmR {
@@ -1946,16 +2175,22 @@ pub(crate) fn emit(
                 SseOpcode::Punpckhwd => (LegacyPrefixes::_66, 0x0F69, 2),
                 SseOpcode::Punpcklbw => (LegacyPrefixes::_66, 0x0F60, 2),
                 SseOpcode::Punpcklwd => (LegacyPrefixes::_66, 0x0F61, 2),
+                SseOpcode::Punpckldq => (LegacyPrefixes::_66, 0x0F62, 2),
+                SseOpcode::Punpcklqdq => (LegacyPrefixes::_66, 0x0F6C, 2),
+                SseOpcode::Punpckhdq => (LegacyPrefixes::_66, 0x0F6A, 2),
+                SseOpcode::Punpckhqdq => (LegacyPrefixes::_66, 0x0F6D, 2),
                 SseOpcode::Pxor => (LegacyPrefixes::_66, 0x0FEF, 2),
                 SseOpcode::Subps => (LegacyPrefixes::None, 0x0F5C, 2),
                 SseOpcode::Subpd => (LegacyPrefixes::_66, 0x0F5C, 2),
                 SseOpcode::Subss => (LegacyPrefixes::_F3, 0x0F5C, 2),
                 SseOpcode::Subsd => (LegacyPrefixes::_F2, 0x0F5C, 2),
                 SseOpcode::Unpcklps => (LegacyPrefixes::None, 0x0F14, 2),
+                SseOpcode::Unpckhps => (LegacyPrefixes::None, 0x0F15, 2),
                 SseOpcode::Xorps => (LegacyPrefixes::None, 0x0F57, 2),
                 SseOpcode::Xorpd => (LegacyPrefixes::_66, 0x0F57, 2),
                 SseOpcode::Phaddw => (LegacyPrefixes::_66, 0x0F3801, 3),
                 SseOpcode::Phaddd => (LegacyPrefixes::_66, 0x0F3802, 3),
+                SseOpcode::Movss => (LegacyPrefixes::_F3, 0x0F10, 2),
                 _ => unimplemented!("Opcode {:?} not implemented", op),
             };
 
@@ -1968,22 +2203,6 @@ pub(crate) fn emit(
                     emit_std_reg_mem(sink, prefix, opcode, length, reg_g, addr, rex, 0);
                 }
             }
-        }
-
-        Inst::XmmConstOp { op, dst } => {
-            let dst = allocs.next(dst.to_reg().to_reg());
-            emit(
-                &Inst::XmmRmR {
-                    op: *op,
-                    dst: Writable::from_reg(Xmm::new(dst).unwrap()),
-                    src1: Xmm::new(dst).unwrap(),
-                    src2: Xmm::new(dst).unwrap().into(),
-                },
-                allocs,
-                sink,
-                info,
-                state,
-            );
         }
 
         Inst::XmmRmRBlend {
@@ -2114,6 +2333,7 @@ pub(crate) fn emit(
                 AvxOpcode::Vpunpckhwd => (LP::_66, OM::_0F, 0x69),
                 AvxOpcode::Vpunpcklwd => (LP::_66, OM::_0F, 0x61),
                 AvxOpcode::Vunpcklps => (LP::None, OM::_0F, 0x14),
+                AvxOpcode::Vunpckhps => (LP::None, OM::_0F, 0x15),
                 AvxOpcode::Vaddps => (LP::None, OM::_0F, 0x58),
                 AvxOpcode::Vaddpd => (LP::_66, OM::_0F, 0x58),
                 AvxOpcode::Vsubps => (LP::None, OM::_0F, 0x5C),
@@ -2171,6 +2391,12 @@ pub(crate) fn emit(
                 AvxOpcode::Vmaxsd => (LP::_F2, OM::_0F, 0x5F),
                 AvxOpcode::Vphaddw => (LP::_66, OM::_0F38, 0x01),
                 AvxOpcode::Vphaddd => (LP::_66, OM::_0F38, 0x02),
+                AvxOpcode::Vpunpckldq => (LP::_66, OM::_0F, 0x62),
+                AvxOpcode::Vpunpckhdq => (LP::_66, OM::_0F, 0x6A),
+                AvxOpcode::Vpunpcklqdq => (LP::_66, OM::_0F, 0x6C),
+                AvxOpcode::Vpunpckhqdq => (LP::_66, OM::_0F, 0x6D),
+                AvxOpcode::Vmovsd => (LP::_F2, OM::_0F, 0x10),
+                AvxOpcode::Vmovss => (LP::_F3, OM::_0F, 0x10),
                 _ => panic!("unexpected rmir vex opcode {op:?}"),
             };
             VexInstruction::new()
@@ -2206,6 +2432,7 @@ pub(crate) fn emit(
                 AvxOpcode::Vpalignr => (false, LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x0F),
                 AvxOpcode::Vinsertps => (false, LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x21),
                 AvxOpcode::Vshufps => (false, LegacyPrefixes::None, OpcodeMap::_0F, 0xC6),
+                AvxOpcode::Vpblendw => (false, LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x0E),
                 _ => panic!("unexpected rmr_imm_vex opcode {op:?}"),
             };
 
@@ -2375,17 +2602,60 @@ pub(crate) fn emit(
                 AvxOpcode::Vcvtps2pd => (LegacyPrefixes::None, OpcodeMap::_0F, 0x5A),
                 AvxOpcode::Vcvttpd2dq => (LegacyPrefixes::_66, OpcodeMap::_0F, 0xE6),
                 AvxOpcode::Vcvttps2dq => (LegacyPrefixes::_F3, OpcodeMap::_0F, 0x5B),
+                AvxOpcode::Vmovdqu => (LegacyPrefixes::_F3, OpcodeMap::_0F, 0x6F),
+                AvxOpcode::Vmovups => (LegacyPrefixes::None, OpcodeMap::_0F, 0x10),
+                AvxOpcode::Vmovupd => (LegacyPrefixes::_66, OpcodeMap::_0F, 0x10),
+
+                // Note that for `vmov{s,d}` the `inst.isle` rules should
+                // statically ensure that only `Amode` operands are used here.
+                // Otherwise the other encodings of `vmovss` are more like
+                // 2-operand instructions which this unary encoding does not
+                // have.
+                AvxOpcode::Vmovss => match &src {
+                    RegisterOrAmode::Amode(_) => (LegacyPrefixes::_F3, OpcodeMap::_0F, 0x10),
+                    _ => unreachable!(),
+                },
+                AvxOpcode::Vmovsd => match &src {
+                    RegisterOrAmode::Amode(_) => (LegacyPrefixes::_F2, OpcodeMap::_0F, 0x10),
+                    _ => unreachable!(),
+                },
+
+                AvxOpcode::Vpbroadcastb => (LegacyPrefixes::_66, OpcodeMap::_0F38, 0x78),
+                AvxOpcode::Vpbroadcastw => (LegacyPrefixes::_66, OpcodeMap::_0F38, 0x79),
+                AvxOpcode::Vpbroadcastd => (LegacyPrefixes::_66, OpcodeMap::_0F38, 0x58),
+                AvxOpcode::Vbroadcastss => (LegacyPrefixes::_66, OpcodeMap::_0F38, 0x18),
+                AvxOpcode::Vmovddup => (LegacyPrefixes::_F2, OpcodeMap::_0F, 0x12),
+
+                AvxOpcode::Vcvtss2sd => (LegacyPrefixes::_F3, OpcodeMap::_0F, 0x5A),
+                AvxOpcode::Vcvtsd2ss => (LegacyPrefixes::_F2, OpcodeMap::_0F, 0x5A),
+                AvxOpcode::Vsqrtss => (LegacyPrefixes::_F3, OpcodeMap::_0F, 0x51),
+                AvxOpcode::Vsqrtsd => (LegacyPrefixes::_F2, OpcodeMap::_0F, 0x51),
+
                 _ => panic!("unexpected rmr_imm_vex opcode {op:?}"),
             };
 
-            VexInstruction::new()
+            let vex = VexInstruction::new()
                 .length(VexVectorLength::V128)
                 .prefix(prefix)
                 .map(map)
                 .opcode(opcode)
                 .reg(dst.to_real_reg().unwrap().hw_enc())
-                .rm(src)
-                .encode(sink);
+                .rm(src);
+
+            // These opcodes take a second operand through `vvvv` which copies
+            // the upper bits into the destination register. That's not
+            // reflected in the CLIF instruction, however, since the SSE version
+            // doesn't have this functionality. Instead just copy whatever
+            // happens to already be in the destination, which at least is what
+            // LLVM seems to do.
+            let vex = match op {
+                AvxOpcode::Vcvtss2sd
+                | AvxOpcode::Vcvtsd2ss
+                | AvxOpcode::Vsqrtss
+                | AvxOpcode::Vsqrtsd => vex.vvvv(dst.to_real_reg().unwrap().hw_enc()),
+                _ => vex,
+            };
+            vex.encode(sink);
         }
 
         Inst::XmmUnaryRmRImmVex { op, src, dst, imm } => {
@@ -2400,18 +2670,183 @@ pub(crate) fn emit(
             let (prefix, map, opcode) = match op {
                 AvxOpcode::Vroundps => (LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x08),
                 AvxOpcode::Vroundpd => (LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x09),
+                AvxOpcode::Vpshuflw => (LegacyPrefixes::_F2, OpcodeMap::_0F, 0x70),
+                AvxOpcode::Vpshufhw => (LegacyPrefixes::_F3, OpcodeMap::_0F, 0x70),
+                AvxOpcode::Vpshufd => (LegacyPrefixes::_66, OpcodeMap::_0F, 0x70),
+                AvxOpcode::Vroundss => (LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x0A),
+                AvxOpcode::Vroundsd => (LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x0B),
                 _ => panic!("unexpected rmr_imm_vex opcode {op:?}"),
             };
 
-            VexInstruction::new()
+            let vex = VexInstruction::new()
                 .length(VexVectorLength::V128)
                 .prefix(prefix)
                 .map(map)
                 .opcode(opcode)
                 .reg(dst.to_real_reg().unwrap().hw_enc())
                 .rm(src)
+                .imm(*imm);
+
+            // See comments in similar block above in `XmmUnaryRmRVex` for what
+            // this is doing.
+            let vex = match op {
+                AvxOpcode::Vroundss | AvxOpcode::Vroundsd => {
+                    vex.vvvv(dst.to_real_reg().unwrap().hw_enc())
+                }
+                _ => vex,
+            };
+            vex.encode(sink);
+        }
+
+        Inst::XmmMovRMVex { op, src, dst } => {
+            let src = allocs.next(src.to_reg());
+            let dst = dst.with_allocs(allocs).finalize(state, sink);
+
+            let (prefix, map, opcode) = match op {
+                AvxOpcode::Vmovdqu => (LegacyPrefixes::_F3, OpcodeMap::_0F, 0x7F),
+                AvxOpcode::Vmovss => (LegacyPrefixes::_F3, OpcodeMap::_0F, 0x11),
+                AvxOpcode::Vmovsd => (LegacyPrefixes::_F2, OpcodeMap::_0F, 0x11),
+                AvxOpcode::Vmovups => (LegacyPrefixes::None, OpcodeMap::_0F, 0x11),
+                AvxOpcode::Vmovupd => (LegacyPrefixes::_66, OpcodeMap::_0F, 0x11),
+                _ => unimplemented!("Opcode {:?} not implemented", op),
+            };
+            VexInstruction::new()
+                .length(VexVectorLength::V128)
+                .prefix(prefix)
+                .map(map)
+                .opcode(opcode)
+                .rm(dst)
+                .reg(src.to_real_reg().unwrap().hw_enc())
+                .encode(sink);
+        }
+
+        Inst::XmmMovRMImmVex { op, src, dst, imm } => {
+            let src = allocs.next(src.to_reg());
+            let dst = dst.with_allocs(allocs).finalize(state, sink);
+
+            let (w, prefix, map, opcode) = match op {
+                AvxOpcode::Vpextrb => (false, LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x14),
+                AvxOpcode::Vpextrw => (false, LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x15),
+                AvxOpcode::Vpextrd => (false, LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x16),
+                AvxOpcode::Vpextrq => (true, LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x16),
+                _ => unimplemented!("Opcode {:?} not implemented", op),
+            };
+            VexInstruction::new()
+                .length(VexVectorLength::V128)
+                .w(w)
+                .prefix(prefix)
+                .map(map)
+                .opcode(opcode)
+                .rm(dst)
+                .reg(src.to_real_reg().unwrap().hw_enc())
                 .imm(*imm)
                 .encode(sink);
+        }
+
+        Inst::XmmToGprImmVex { op, src, dst, imm } => {
+            let src = allocs.next(src.to_reg());
+            let dst = allocs.next(dst.to_reg().to_reg());
+
+            let (w, prefix, map, opcode) = match op {
+                AvxOpcode::Vpextrb => (false, LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x14),
+                AvxOpcode::Vpextrw => (false, LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x15),
+                AvxOpcode::Vpextrd => (false, LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x16),
+                AvxOpcode::Vpextrq => (true, LegacyPrefixes::_66, OpcodeMap::_0F3A, 0x16),
+                _ => unimplemented!("Opcode {:?} not implemented", op),
+            };
+            VexInstruction::new()
+                .length(VexVectorLength::V128)
+                .w(w)
+                .prefix(prefix)
+                .map(map)
+                .opcode(opcode)
+                .rm(dst.to_real_reg().unwrap().hw_enc())
+                .reg(src.to_real_reg().unwrap().hw_enc())
+                .imm(*imm)
+                .encode(sink);
+        }
+
+        Inst::XmmToGprVex {
+            op,
+            src,
+            dst,
+            dst_size,
+        } => {
+            let src = allocs.next(src.to_reg());
+            let dst = allocs.next(dst.to_reg().to_reg());
+
+            let (prefix, map, opcode) = match op {
+                // vmovd/vmovq are differentiated by `w`
+                AvxOpcode::Vmovd | AvxOpcode::Vmovq => (LegacyPrefixes::_66, OpcodeMap::_0F, 0x7E),
+                AvxOpcode::Vmovmskps => (LegacyPrefixes::None, OpcodeMap::_0F, 0x50),
+                AvxOpcode::Vmovmskpd => (LegacyPrefixes::_66, OpcodeMap::_0F, 0x50),
+                AvxOpcode::Vpmovmskb => (LegacyPrefixes::_66, OpcodeMap::_0F, 0xD7),
+                _ => unimplemented!("Opcode {:?} not implemented", op),
+            };
+            let w = match dst_size {
+                OperandSize::Size64 => true,
+                _ => false,
+            };
+            let mut vex = VexInstruction::new()
+                .length(VexVectorLength::V128)
+                .w(w)
+                .prefix(prefix)
+                .map(map)
+                .opcode(opcode);
+            vex = match op {
+                // The `vmovq/vmovd` reverse the order of the destination/source
+                // relative to other opcodes using this shape of instruction.
+                AvxOpcode::Vmovd | AvxOpcode::Vmovq => vex
+                    .rm(dst.to_real_reg().unwrap().hw_enc())
+                    .reg(src.to_real_reg().unwrap().hw_enc()),
+                _ => vex
+                    .rm(src.to_real_reg().unwrap().hw_enc())
+                    .reg(dst.to_real_reg().unwrap().hw_enc()),
+            };
+            vex.encode(sink);
+        }
+
+        Inst::GprToXmmVex {
+            op,
+            src,
+            dst,
+            src_size,
+        } => {
+            let dst = allocs.next(dst.to_reg().to_reg());
+            let src = match src.clone().to_reg_mem().with_allocs(allocs) {
+                RegMem::Reg { reg } => {
+                    RegisterOrAmode::Register(reg.to_real_reg().unwrap().hw_enc().into())
+                }
+                RegMem::Mem { addr } => RegisterOrAmode::Amode(addr.finalize(state, sink)),
+            };
+
+            let (prefix, map, opcode) = match op {
+                // vmovd/vmovq are differentiated by `w`
+                AvxOpcode::Vmovd | AvxOpcode::Vmovq => (LegacyPrefixes::_66, OpcodeMap::_0F, 0x6E),
+                AvxOpcode::Vcvtsi2ss => (LegacyPrefixes::_F3, OpcodeMap::_0F, 0x2A),
+                AvxOpcode::Vcvtsi2sd => (LegacyPrefixes::_F2, OpcodeMap::_0F, 0x2A),
+                _ => unimplemented!("Opcode {:?} not implemented", op),
+            };
+            let w = match src_size {
+                OperandSize::Size64 => true,
+                _ => false,
+            };
+            let mut insn = VexInstruction::new()
+                .length(VexVectorLength::V128)
+                .w(w)
+                .prefix(prefix)
+                .map(map)
+                .opcode(opcode)
+                .rm(src)
+                .reg(dst.to_real_reg().unwrap().hw_enc());
+            // These opcodes technically take a second operand which is the
+            // upper bits to preserve during the float conversion. We don't
+            // actually use this in this backend right now so reuse the
+            // destination register. This at least matches what LLVM does.
+            if let AvxOpcode::Vcvtsi2ss | AvxOpcode::Vcvtsi2sd = op {
+                insn = insn.vvvv(dst.to_real_reg().unwrap().hw_enc());
+            }
+            insn.encode(sink);
         }
 
         Inst::XmmRmREvex {
@@ -2422,38 +2857,44 @@ pub(crate) fn emit(
         }
         | Inst::XmmRmREvex3 {
             op,
-            src1,
-            src2,
+            src1: _, // `dst` reuses `src1`.
+            src2: src1,
+            src3: src2,
             dst,
-            // `dst` reuses `src3`.
-            ..
         } => {
+            let reused_src = match inst {
+                Inst::XmmRmREvex3 { src1, .. } => Some(allocs.next(src1.to_reg())),
+                _ => None,
+            };
+            let src1 = allocs.next(src1.to_reg());
+            let src2 = match src2.clone().to_reg_mem().with_allocs(allocs) {
+                RegMem::Reg { reg } => {
+                    RegisterOrAmode::Register(reg.to_real_reg().unwrap().hw_enc().into())
+                }
+                RegMem::Mem { addr } => RegisterOrAmode::Amode(addr.finalize(state, sink)),
+            };
             let dst = allocs.next(dst.to_reg().to_reg());
-            let src2 = allocs.next(src2.to_reg());
-            if let Inst::XmmRmREvex3 { src3, .. } = inst {
-                let src3 = allocs.next(src3.to_reg());
-                debug_assert_eq!(src3, dst);
+            if let Some(src1) = reused_src {
+                debug_assert_eq!(src1, dst);
             }
-            let src1 = src1.clone().to_reg_mem().with_allocs(allocs);
 
-            let (w, opcode) = match op {
-                Avx512Opcode::Vpermi2b => (false, 0x75),
-                Avx512Opcode::Vpmullq => (true, 0x40),
+            let (w, opcode, map) = match op {
+                Avx512Opcode::Vpermi2b => (false, 0x75, OpcodeMap::_0F38),
+                Avx512Opcode::Vpmullq => (true, 0x40, OpcodeMap::_0F38),
+                Avx512Opcode::Vpsraq => (true, 0xE2, OpcodeMap::_0F),
                 _ => unimplemented!("Opcode {:?} not implemented", op),
             };
-            match src1 {
-                RegMem::Reg { reg: src } => EvexInstruction::new()
-                    .length(EvexVectorLength::V128)
-                    .prefix(LegacyPrefixes::_66)
-                    .map(OpcodeMap::_0F38)
-                    .w(w)
-                    .opcode(opcode)
-                    .reg(dst.to_real_reg().unwrap().hw_enc())
-                    .rm(src.to_real_reg().unwrap().hw_enc())
-                    .vvvvv(src2.to_real_reg().unwrap().hw_enc())
-                    .encode(sink),
-                _ => todo!(),
-            };
+            EvexInstruction::new()
+                .length(EvexVectorLength::V128)
+                .prefix(LegacyPrefixes::_66)
+                .map(map)
+                .w(w)
+                .opcode(opcode)
+                .tuple_type(op.tuple_type())
+                .reg(dst.to_real_reg().unwrap().hw_enc())
+                .vvvvv(src1.to_real_reg().unwrap().hw_enc())
+                .rm(src2)
+                .encode(sink);
         }
 
         Inst::XmmMinMaxSeq {
@@ -2536,18 +2977,18 @@ pub(crate) fn emit(
             // x86's min/max are not symmetric; if either operand is a NaN, they return the
             // read-only operand: perform an addition between the two operands, which has the
             // desired NaN propagation effects.
-            sink.bind_label(propagate_nan);
+            sink.bind_label(propagate_nan, state.ctrl_plane_mut());
             let inst = Inst::xmm_rm_r(add_op, RegMem::reg(lhs), Writable::from_reg(dst));
             inst.emit(&[], sink, info, state);
 
             one_way_jmp(sink, CC::P, done);
 
-            sink.bind_label(do_min_max);
+            sink.bind_label(do_min_max, state.ctrl_plane_mut());
 
             let inst = Inst::xmm_rm_r(min_max_op, RegMem::reg(lhs), Writable::from_reg(dst));
             inst.emit(&[], sink, info, state);
 
-            sink.bind_label(done);
+            sink.bind_label(done, state.ctrl_plane_mut());
         }
 
         Inst::XmmRmRImm {
@@ -2574,6 +3015,7 @@ pub(crate) fn emit(
                 SseOpcode::Pinsrw => (LegacyPrefixes::_66, 0x0FC4, 2),
                 SseOpcode::Pinsrd => (LegacyPrefixes::_66, 0x0F3A22, 3),
                 SseOpcode::Shufps => (LegacyPrefixes::None, 0x0FC6, 2),
+                SseOpcode::Pblendw => (LegacyPrefixes::_66, 0x0F3A0E, 3),
                 _ => unimplemented!("Opcode {:?} not implemented", op),
             };
             let rex = RexFlags::from(*size);
@@ -2612,7 +3054,7 @@ pub(crate) fn emit(
         }
 
         Inst::XmmMovRM { op, src, dst } => {
-            let src = allocs.next(*src);
+            let src = allocs.next(src.to_reg());
             let dst = dst.with_allocs(allocs);
 
             let (prefix, opcode) = match op {
@@ -2627,6 +3069,27 @@ pub(crate) fn emit(
             };
             let dst = &dst.finalize(state, sink);
             emit_std_reg_mem(sink, prefix, opcode, 2, src, dst, RexFlags::clear_w(), 0);
+        }
+
+        Inst::XmmMovRMImm { op, src, dst, imm } => {
+            let src = allocs.next(src.to_reg());
+            let dst = dst.with_allocs(allocs);
+
+            let (w, prefix, opcode) = match op {
+                SseOpcode::Pextrb => (false, LegacyPrefixes::_66, 0x0F3A14),
+                SseOpcode::Pextrw => (false, LegacyPrefixes::_66, 0x0F3A15),
+                SseOpcode::Pextrd => (false, LegacyPrefixes::_66, 0x0F3A16),
+                SseOpcode::Pextrq => (true, LegacyPrefixes::_66, 0x0F3A16),
+                _ => unimplemented!("Opcode {:?} not implemented", op),
+            };
+            let rex = if w {
+                RexFlags::set_w()
+            } else {
+                RexFlags::clear_w()
+            };
+            let dst = &dst.finalize(state, sink);
+            emit_std_reg_mem(sink, prefix, opcode, 3, src, dst, rex, 1);
+            sink.put1(*imm);
         }
 
         Inst::XmmToGpr {
@@ -2792,7 +3255,7 @@ pub(crate) fn emit(
             let inst = Inst::jmp_known(done);
             inst.emit(&[], sink, info, state);
 
-            sink.bind_label(handle_negative);
+            sink.bind_label(handle_negative, state.ctrl_plane_mut());
 
             // Divide x by two to get it in range for the signed conversion, keep the LSB, and
             // scale it back up on the FP side.
@@ -2845,7 +3308,7 @@ pub(crate) fn emit(
             let inst = Inst::xmm_rm_r(add_op, RegMem::reg(dst), Writable::from_reg(dst));
             inst.emit(&[], sink, info, state);
 
-            sink.bind_label(done);
+            sink.bind_label(done, state.ctrl_plane_mut());
         }
 
         Inst::CvtFloatToSintSeq {
@@ -2915,7 +3378,6 @@ pub(crate) fn emit(
             };
 
             let done = sink.get_label();
-            let not_nan = sink.get_label();
 
             // The truncation.
             let inst = Inst::xmm_to_gpr(trunc_op, src, Writable::from_reg(dst), *dst_size);
@@ -2932,9 +3394,10 @@ pub(crate) fn emit(
             let inst = Inst::xmm_cmp_rm_r(cmp_op, RegMem::reg(src), src);
             inst.emit(&[], sink, info, state);
 
-            one_way_jmp(sink, CC::NP, not_nan); // go to not_nan if not a NaN
-
             if *is_saturating {
+                let not_nan = sink.get_label();
+                one_way_jmp(sink, CC::NP, not_nan); // go to not_nan if not a NaN
+
                 // For NaN, emit 0.
                 let inst = Inst::alu_rmi_r(
                     *dst_size,
@@ -2947,7 +3410,7 @@ pub(crate) fn emit(
                 let inst = Inst::jmp_known(done);
                 inst.emit(&[], sink, info, state);
 
-                sink.bind_label(not_nan);
+                sink.bind_label(not_nan, state.ctrl_plane_mut());
 
                 // If the input was positive, saturate to INT_MAX.
 
@@ -2978,9 +3441,7 @@ pub(crate) fn emit(
                     inst.emit(&[], sink, info, state);
                 }
             } else {
-                let check_positive = sink.get_label();
-
-                let inst = Inst::trap(TrapCode::BadConversionToInteger);
+                let inst = Inst::trap_if(CC::P, TrapCode::BadConversionToInteger);
                 inst.emit(&[], sink, info, state);
 
                 // Check if INT_MIN was the correct result: determine the smallest floating point
@@ -2988,8 +3449,6 @@ pub(crate) fn emit(
                 // against the src register.
                 // If the src register is less (or in some cases, less-or-equal) than the threshold,
                 // trap!
-
-                sink.bind_label(not_nan);
 
                 let mut no_overflow_cc = CC::NB; // >=
                 let output_bits = dst_size.to_bits();
@@ -3027,15 +3486,11 @@ pub(crate) fn emit(
                 let inst = Inst::xmm_cmp_rm_r(cmp_op, RegMem::reg(tmp_xmm), src);
                 inst.emit(&[], sink, info, state);
 
-                // jump over trap if src >= or > threshold
-                one_way_jmp(sink, no_overflow_cc, check_positive);
-
-                let inst = Inst::trap(TrapCode::IntegerOverflow);
+                // no trap if src >= or > threshold
+                let inst = Inst::trap_if(no_overflow_cc.invert(), TrapCode::IntegerOverflow);
                 inst.emit(&[], sink, info, state);
 
                 // If positive, it was a real overflow.
-
-                sink.bind_label(check_positive);
 
                 // Zero out the tmp_xmm register.
                 let inst = Inst::xmm_rm_r(
@@ -3048,13 +3503,12 @@ pub(crate) fn emit(
                 let inst = Inst::xmm_cmp_rm_r(cmp_op, RegMem::reg(src), tmp_xmm);
                 inst.emit(&[], sink, info, state);
 
-                one_way_jmp(sink, CC::NB, done); // jump over trap if 0 >= src
-
-                let inst = Inst::trap(TrapCode::IntegerOverflow);
+                // no trap if 0 >= src
+                let inst = Inst::trap_if(CC::B, TrapCode::IntegerOverflow);
                 inst.emit(&[], sink, info, state);
             }
 
-            sink.bind_label(done);
+            sink.bind_label(done, state.ctrl_plane_mut());
         }
 
         Inst::CvtFloatToUintSeq {
@@ -3150,11 +3604,10 @@ pub(crate) fn emit(
             let handle_large = sink.get_label();
             one_way_jmp(sink, CC::NB, handle_large); // jump to handle_large if src >= large_threshold
 
-            let not_nan = sink.get_label();
-            one_way_jmp(sink, CC::NP, not_nan); // jump over trap if not NaN
-
             if *is_saturating {
-                // Emit 0.
+                // If not NaN jump over this 0-return, otherwise return 0
+                let not_nan = sink.get_label();
+                one_way_jmp(sink, CC::NP, not_nan);
                 let inst = Inst::alu_rmi_r(
                     *dst_size,
                     AluRmiROpcode::Xor,
@@ -3165,13 +3618,12 @@ pub(crate) fn emit(
 
                 let inst = Inst::jmp_known(done);
                 inst.emit(&[], sink, info, state);
+                sink.bind_label(not_nan, state.ctrl_plane_mut());
             } else {
                 // Trap.
-                let inst = Inst::trap(TrapCode::BadConversionToInteger);
+                let inst = Inst::trap_if(CC::P, TrapCode::BadConversionToInteger);
                 inst.emit(&[], sink, info, state);
             }
-
-            sink.bind_label(not_nan);
 
             // Actual truncation for small inputs: if the result is not positive, then we had an
             // overflow.
@@ -3205,7 +3657,7 @@ pub(crate) fn emit(
 
             // Now handle large inputs.
 
-            sink.bind_label(handle_large);
+            sink.bind_label(handle_large, state.ctrl_plane_mut());
 
             let inst = Inst::gen_move(Writable::from_reg(tmp_xmm2), src, types::F64);
             inst.emit(&[], sink, info, state);
@@ -3219,10 +3671,10 @@ pub(crate) fn emit(
             let inst = Inst::cmp_rmi_r(*dst_size, RegMemImm::imm(0), dst);
             inst.emit(&[], sink, info, state);
 
-            let next_is_large = sink.get_label();
-            one_way_jmp(sink, CC::NL, next_is_large); // if dst >= 0, jump to next_is_large
-
             if *is_saturating {
+                let next_is_large = sink.get_label();
+                one_way_jmp(sink, CC::NL, next_is_large); // if dst >= 0, jump to next_is_large
+
                 // The input was "large" (>= 2**(width -1)), so the only way to get an integer
                 // overflow is because the input was too large: saturate to the max value.
                 let inst = Inst::imm(
@@ -3238,12 +3690,11 @@ pub(crate) fn emit(
 
                 let inst = Inst::jmp_known(done);
                 inst.emit(&[], sink, info, state);
+                sink.bind_label(next_is_large, state.ctrl_plane_mut());
             } else {
-                let inst = Inst::trap(TrapCode::IntegerOverflow);
+                let inst = Inst::trap_if(CC::L, TrapCode::IntegerOverflow);
                 inst.emit(&[], sink, info, state);
             }
-
-            sink.bind_label(next_is_large);
 
             if *dst_size == OperandSize::Size64 {
                 let inst = Inst::imm(OperandSize::Size64, 1 << 63, Writable::from_reg(tmp_gpr));
@@ -3266,10 +3717,15 @@ pub(crate) fn emit(
                 inst.emit(&[], sink, info, state);
             }
 
-            sink.bind_label(done);
+            sink.bind_label(done, state.ctrl_plane_mut());
         }
 
-        Inst::LoadExtName { dst, name, offset } => {
+        Inst::LoadExtName {
+            dst,
+            name,
+            offset,
+            distance,
+        } => {
             let dst = allocs.next(dst.to_reg());
 
             if info.flags.is_pic() {
@@ -3295,6 +3751,16 @@ pub(crate) fn emit(
                     sink.put1(0xc0 | (enc_dst & 7));
                     sink.put4(*offset as u32);
                 }
+            } else if distance == &RelocDistance::Near {
+                // If we know the distance to the name is within 2GB (e.g., a module-local function),
+                // we can generate a RIP-relative address, with a relocation.
+                // Generates: lea $name(%rip), $dst
+                let enc_dst = int_reg_enc(dst);
+                sink.put1(0x48 | ((enc_dst >> 3) & 1) << 2);
+                sink.put1(0x8D);
+                sink.put1(0x05 | ((enc_dst & 7) << 3));
+                emit_reloc(sink, Reloc::X86CallPCRel4, name, -4);
+                sink.put4(0);
             } else {
                 // The full address can be encoded in the register, with a relocation.
                 // Generates: movabsq $name, %dst
@@ -3376,7 +3842,7 @@ pub(crate) fn emit(
             i1.emit(&[], sink, info, state);
 
             // again:
-            sink.bind_label(again_label);
+            sink.bind_label(again_label, state.ctrl_plane_mut());
 
             // movq %rax, %r_temp
             let i2 = Inst::mov_r_r(OperandSize::Size64, dst_old.to_reg(), temp);
@@ -3474,17 +3940,11 @@ pub(crate) fn emit(
             if let Some(s) = state.take_stack_map() {
                 sink.add_stack_map(StackMapExtent::UpcomingBytes(2), s);
             }
-            sink.put1(0x0f);
-            sink.put1(0x0b);
+            sink.put_data(Inst::TRAP_OPCODE);
         }
 
         Inst::VirtualSPOffsetAdj { offset } => {
-            trace!(
-                "virtual sp offset adjusted by {} -> {}",
-                offset,
-                state.virtual_sp_offset + offset
-            );
-            state.virtual_sp_offset += offset;
+            state.adjust_virtual_sp_offset(*offset);
         }
 
         Inst::Nop { len } => {
@@ -3682,4 +4142,159 @@ pub(crate) fn emit(
     }
 
     state.clear_post_insn();
+}
+
+/// Emit the common sequence used for both direct and indirect tail calls:
+///
+/// * Copy the new frame's stack arguments over the top of our current frame.
+///
+/// * Restore the old frame pointer.
+///
+/// * Initialize the tail callee's stack pointer (simultaneously deallocating
+///   the temporary stack space we allocated when creating the new frame's stack
+///   arguments).
+///
+/// * Move the return address into its stack slot.
+fn emit_return_call_common_sequence(
+    allocs: &mut AllocationConsumer<'_>,
+    sink: &mut MachBuffer<Inst>,
+    info: &EmitInfo,
+    state: &mut EmitState,
+    new_stack_arg_size: u32,
+    old_stack_arg_size: u32,
+    ret_addr: Option<Gpr>,
+    fp: Gpr,
+    tmp: WritableGpr,
+    uses: &CallArgList,
+) {
+    assert!(
+        info.flags.preserve_frame_pointers(),
+        "frame pointers aren't fundamentally required for tail calls, \
+                 but the current implementation relies on them being present"
+    );
+
+    for u in uses {
+        let _ = allocs.next(u.vreg);
+    }
+
+    let ret_addr = ret_addr.map(|r| Gpr::new(allocs.next(*r)).unwrap());
+
+    let fp = allocs.next(*fp);
+
+    let tmp = allocs.next(tmp.to_reg().to_reg());
+    let tmp = Gpr::new(tmp).unwrap();
+    let tmp_w = WritableGpr::from_reg(tmp);
+
+    // Copy the new frame (which is `frame_size` bytes above the SP)
+    // onto our current frame, using only volatile, non-argument
+    // registers.
+    //
+    //
+    // The current stack layout is the following:
+    //
+    //            | ...                 |
+    //            +---------------------+
+    //            | ...                 |
+    //            | stack arguments     |
+    //            | ...                 |
+    //    current | return address      |
+    //    frame   | old FP              | <-- FP
+    //            | ...                 |
+    //            | old stack slots     |
+    //            | ...                 |
+    //            +---------------------+
+    //            | ...                 |
+    //    new     | new stack arguments |
+    //    frame   | ...                 | <-- SP
+    //            +---------------------+
+    //
+    // We need to restore the old FP, copy the new stack arguments over the old
+    // stack arguments, write the return address into the correct slot just
+    // after the new stack arguments, adjust SP to point to the new return
+    // address, and then jump to the callee (which will push the old FP again).
+
+    // Restore the old FP into `rbp`.
+    Inst::Mov64MR {
+        src: SyntheticAmode::Real(Amode::ImmReg {
+            simm32: 0,
+            base: fp,
+            flags: MemFlags::trusted(),
+        }),
+        dst: Writable::from_reg(Gpr::new(regs::rbp()).unwrap()),
+    }
+    .emit(&[], sink, info, state);
+
+    // The new lowest address (top of stack) -- relative to FP -- for
+    // our tail callee. We compute this now so that we can move our
+    // stack arguments into place.
+    let callee_sp_relative_to_fp = i64::from(old_stack_arg_size) - i64::from(new_stack_arg_size);
+
+    // Copy over each word, using `tmp` as a temporary register.
+    //
+    // Note that we have to do this from stack slots with the highest
+    // address to lowest address because in the case of when the tail
+    // callee has more stack arguments than we do, we might otherwise
+    // overwrite some of our stack arguments before they've been copied
+    // into place.
+    assert_eq!(
+        new_stack_arg_size % 8,
+        0,
+        "stack argument space sizes should always be 8-byte aligned"
+    );
+    for i in (0..new_stack_arg_size / 8).rev() {
+        Inst::Mov64MR {
+            src: SyntheticAmode::Real(Amode::ImmReg {
+                simm32: (i * 8).try_into().unwrap(),
+                base: regs::rsp(),
+                flags: MemFlags::trusted(),
+            }),
+            dst: tmp_w,
+        }
+        .emit(&[], sink, info, state);
+        Inst::MovRM {
+            size: OperandSize::Size64,
+            src: tmp,
+            dst: SyntheticAmode::Real(Amode::ImmReg {
+                // Add 2 because we need to skip over the old FP and the
+                // return address.
+                simm32: (callee_sp_relative_to_fp + i64::from((i + 2) * 8))
+                    .try_into()
+                    .unwrap(),
+                base: fp,
+                flags: MemFlags::trusted(),
+            }),
+        }
+        .emit(&[], sink, info, state);
+    }
+
+    // Initialize SP for the tail callee, deallocating the temporary
+    // stack arguments space at the same time.
+    Inst::LoadEffectiveAddress {
+        size: OperandSize::Size64,
+        addr: SyntheticAmode::Real(Amode::ImmReg {
+            // NB: We add a word to `callee_sp_relative_to_fp` here because the
+            // callee will push FP, not us.
+            simm32: callee_sp_relative_to_fp.wrapping_add(8).try_into().unwrap(),
+            base: fp,
+            flags: MemFlags::trusted(),
+        }),
+        dst: Writable::from_reg(Gpr::new(regs::rsp()).unwrap()),
+    }
+    .emit(&[], sink, info, state);
+
+    state.adjust_virtual_sp_offset(-i64::from(new_stack_arg_size));
+
+    // Write the return address into the correct stack slot.
+    if let Some(ret_addr) = ret_addr {
+        Inst::MovRM {
+            size: OperandSize::Size64,
+            src: ret_addr,
+            dst: SyntheticAmode::Real(Amode::ImmReg {
+                simm32: 0,
+                base: regs::rsp(),
+                flags: MemFlags::trusted(),
+            }),
+        }
+        .emit(&[], sink, info, state);
+    }
 }

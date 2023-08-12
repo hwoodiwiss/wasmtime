@@ -12,7 +12,7 @@ use target_lexicon::Architecture;
 /// A trait for generating random Cranelift datastructures.
 pub trait CraneliftArbitrary {
     fn _type(&mut self, architecture: Architecture) -> Result<Type>;
-    fn callconv(&mut self) -> Result<CallConv>;
+    fn callconv(&mut self, architecture: Architecture) -> Result<CallConv>;
     fn abi_param(&mut self, architecture: Architecture) -> Result<AbiParam>;
     fn signature(
         &mut self,
@@ -23,28 +23,52 @@ pub trait CraneliftArbitrary {
     fn datavalue(&mut self, ty: Type) -> Result<DataValue>;
 }
 
+/// Returns the set of types that are valid for value generation, dependent on architecture.
+pub fn types_for_architecture(architecture: Architecture) -> &'static [Type] {
+    // TODO: It would be nice if we could get these directly from cranelift
+    // TODO: RISCV does not support SIMD yet
+    let supports_simd = !matches!(architecture, Architecture::Riscv64(_));
+    if supports_simd {
+        &[
+            I8, I16, I32, I64, I128, // Scalar Integers
+            F32, F64, // Scalar Floats
+            I8X16, I16X8, I32X4, I64X2, // SIMD Integers
+            F32X4, F64X2, // SIMD Floats
+        ]
+    } else {
+        &[I8, I16, I32, I64, I128, F32, F64]
+    }
+}
+
 impl<'a> CraneliftArbitrary for &mut Unstructured<'a> {
     fn _type(&mut self, architecture: Architecture) -> Result<Type> {
-        // TODO: It would be nice if we could get these directly from cranelift
-        // TODO: RISCV does not support SIMD yet
-        let supports_simd = !matches!(architecture, Architecture::Riscv64(_));
-        let choices = if supports_simd {
-            &[
-                I8, I16, I32, I64, I128, // Scalar Integers
-                F32, F64, // Scalar Floats
-                I8X16, I16X8, I32X4, I64X2, // SIMD Integers
-                F32X4, F64X2, // SIMD Floats
-            ][..]
-        } else {
-            &[I8, I16, I32, I64, I128, F32, F64][..]
-        };
-
-        Ok(*self.choose(choices)?)
+        Ok(*self.choose(types_for_architecture(architecture))?)
     }
 
-    fn callconv(&mut self) -> Result<CallConv> {
-        // TODO: Generate random CallConvs per target
-        Ok(CallConv::SystemV)
+    fn callconv(&mut self, architecture: Architecture) -> Result<CallConv> {
+        // These are implemented and should work on all backends
+        let mut allowed_callconvs = vec![CallConv::Fast, CallConv::Cold, CallConv::SystemV];
+
+        // Fastcall is supposed to work on x86 and aarch64
+        if matches!(
+            architecture,
+            Architecture::X86_64 | Architecture::Aarch64(_)
+        ) {
+            allowed_callconvs.push(CallConv::WindowsFastcall);
+        }
+
+        // AArch64 has a few Apple specific calling conventions
+        if matches!(architecture, Architecture::Aarch64(_)) {
+            allowed_callconvs.push(CallConv::AppleAarch64);
+        }
+
+        // TODO(#6530): The `tail` calling convention is not supported on s390x
+        // yet.
+        if !matches!(architecture, Architecture::S390x) {
+            allowed_callconvs.push(CallConv::Tail);
+        }
+
+        Ok(*self.choose(&allowed_callconvs[..])?)
     }
 
     fn abi_param(&mut self, architecture: Architecture) -> Result<AbiParam> {
@@ -74,7 +98,7 @@ impl<'a> CraneliftArbitrary for &mut Unstructured<'a> {
         max_params: usize,
         max_rets: usize,
     ) -> Result<Signature> {
-        let callconv = self.callconv()?;
+        let callconv = self.callconv(architecture)?;
         let mut sig = Signature::new(callconv);
 
         for _ in 0..max_params {

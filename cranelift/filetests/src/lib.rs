@@ -24,10 +24,8 @@
 
 pub use crate::function_runner::TestFileCompiler;
 use crate::runner::TestRunner;
-use cranelift_codegen::timing;
 use cranelift_reader::TestCommand;
 use std::path::Path;
-use std::time;
 
 mod concurrent;
 pub mod function_runner;
@@ -43,13 +41,10 @@ mod test_dce;
 mod test_domtree;
 mod test_interpret;
 mod test_legalizer;
-mod test_licm;
 mod test_optimize;
 mod test_print_cfg;
 mod test_run;
 mod test_safepoint;
-mod test_simple_gvn;
-mod test_simple_preopt;
 mod test_unwind;
 mod test_verifier;
 mod test_wasm;
@@ -63,7 +58,7 @@ mod test_wasm;
 /// Directories are scanned recursively for test cases ending in `.clif`. These test cases are
 /// executed on background threads.
 ///
-pub fn run(verbose: bool, report_times: bool, files: &[String]) -> anyhow::Result<time::Duration> {
+pub fn run(verbose: bool, report_times: bool, files: &[String]) -> anyhow::Result<()> {
     let mut runner = TestRunner::new(verbose, report_times);
 
     for path in files.iter().map(Path::new) {
@@ -89,8 +84,8 @@ pub fn run_passes(
     passes: &[String],
     target: &str,
     file: &str,
-) -> anyhow::Result<time::Duration> {
-    let mut runner = TestRunner::new(verbose, /* report_times */ false);
+) -> anyhow::Result<()> {
+    let mut runner = TestRunner::new(verbose, report_times);
 
     let path = Path::new(file);
     if path == Path::new("-") || path.is_file() {
@@ -99,11 +94,8 @@ pub fn run_passes(
         runner.push_dir(path);
     }
 
-    let result = runner.run_passes(passes, target);
-    if report_times {
-        println!("{}", timing::take_current());
-    }
-    result
+    runner.start_threads();
+    runner.run_passes(passes, target)
 }
 
 /// Create a new subcommand trait object to match `parsed.command`.
@@ -119,13 +111,10 @@ fn new_subtest(parsed: &TestCommand) -> anyhow::Result<Box<dyn subtest::SubTest>
         "domtree" => test_domtree::subtest(parsed),
         "interpret" => test_interpret::subtest(parsed),
         "legalizer" => test_legalizer::subtest(parsed),
-        "licm" => test_licm::subtest(parsed),
         "optimize" => test_optimize::subtest(parsed),
         "print-cfg" => test_print_cfg::subtest(parsed),
         "run" => test_run::subtest(parsed),
         "safepoint" => test_safepoint::subtest(parsed),
-        "simple-gvn" => test_simple_gvn::subtest(parsed),
-        "simple_preopt" => test_simple_preopt::subtest(parsed),
         "unwind" => test_unwind::subtest(parsed),
         "verifier" => test_verifier::subtest(parsed),
         _ => anyhow::bail!("unknown test command '{}'", parsed.command),

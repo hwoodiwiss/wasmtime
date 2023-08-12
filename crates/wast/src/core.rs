@@ -39,6 +39,14 @@ fn extract_lane_as_i64(bytes: u128, lane: usize) -> i64 {
 
 pub fn match_val(actual: &Val, expected: &WastRetCore) -> Result<()> {
     match (actual, expected) {
+        (_, WastRetCore::Either(expected)) => {
+            for expected in expected {
+                if match_val(actual, expected).is_ok() {
+                    return Ok(());
+                }
+            }
+            match_val(actual, &expected[0])
+        }
         (Val::I32(a), WastRetCore::I32(b)) => match_int(a, b),
         (Val::I64(a), WastRetCore::I64(b)) => match_int(a, b),
         // Note that these float comparisons are comparing bits, not float
@@ -72,11 +80,17 @@ pub fn match_val(actual: &Val, expected: &WastRetCore) -> Result<()> {
                 bail!("expected non-null externref, found null")
             }
         }
-        (Val::FuncRef(x), WastRetCore::RefNull(_)) => {
+        (Val::FuncRef(actual), WastRetCore::RefNull(expected)) => match (actual, expected) {
+            (None, None) => Ok(()),
+            (None, Some(HeapType::Func)) => Ok(()),
+            (None, Some(_)) => bail!("expected null non-funcref, found null funcref"),
+            (Some(_), _) => bail!("expected null funcref, found non-null"),
+        },
+        (Val::FuncRef(x), WastRetCore::RefFunc(_)) => {
             if x.is_none() {
-                Ok(())
+                bail!("expected non-null funcref, found null");
             } else {
-                bail!("expected null funcref, found non-null")
+                Ok(())
             }
         }
         _ => bail!(

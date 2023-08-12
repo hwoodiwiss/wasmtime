@@ -5,10 +5,11 @@ use crate::{AsContext, AsContextMut, Engine, MemoryType, StoreContext, StoreCont
 use anyhow::{bail, Result};
 use std::cell::UnsafeCell;
 use std::convert::TryFrom;
+use std::ops::Range;
 use std::slice;
 use std::time::Instant;
 use wasmtime_environ::MemoryPlan;
-use wasmtime_runtime::{RuntimeLinearMemory, VMMemoryImport};
+use wasmtime_runtime::{ExportMemory, RuntimeLinearMemory, VMMemoryImport};
 
 pub use wasmtime_runtime::WaitResult;
 
@@ -268,6 +269,10 @@ impl Memory {
             let export = generate_memory_export(store, &ty, None)?;
             Ok(Memory::from_wasmtime_memory(export, store))
         }
+    }
+
+    pub(crate) fn from_stored(stored: Stored<ExportMemory>) -> Memory {
+        Memory(stored)
     }
 
     /// Returns the underlying type of this memory.
@@ -547,8 +552,9 @@ impl Memory {
     fn wasmtime_memory(&self, store: &mut StoreOpaque) -> *mut wasmtime_runtime::Memory {
         unsafe {
             let export = &store[self.0];
-            let mut handle = wasmtime_runtime::InstanceHandle::from_vmctx(export.vmctx);
-            handle.get_defined_memory(export.index)
+            wasmtime_runtime::Instance::from_vmctx(export.vmctx, |handle| {
+                handle.get_defined_memory(export.index)
+            })
         }
     }
 
@@ -611,6 +617,10 @@ pub unsafe trait LinearMemory: Send + Sync + 'static {
 
     /// Return the allocated memory as a mutable pointer to u8.
     fn as_ptr(&self) -> *mut u8;
+
+    /// Returns the range of native addresses that WebAssembly can natively
+    /// access from this linear memory, including guard pages.
+    fn wasm_accessible(&self) -> Range<usize>;
 }
 
 /// A memory creator. Can be used to provide a memory creator
@@ -764,7 +774,7 @@ impl SharedMemory {
     pub fn data(&self) -> &[UnsafeCell<u8>] {
         unsafe {
             let definition = &*self.0.vmmemory_ptr();
-            slice::from_raw_parts_mut(definition.base.cast(), definition.current_length())
+            slice::from_raw_parts(definition.base.cast(), definition.current_length())
         }
     }
 
@@ -900,16 +910,17 @@ impl SharedMemory {
         wasmtime_export: wasmtime_runtime::ExportMemory,
         store: &mut StoreOpaque,
     ) -> Self {
-        let mut handle = wasmtime_runtime::InstanceHandle::from_vmctx(wasmtime_export.vmctx);
-        let memory = handle
-            .get_defined_memory(wasmtime_export.index)
-            .as_mut()
-            .unwrap();
-        let shared_memory = memory
-            .as_shared_memory()
-            .expect("unable to convert from a shared memory")
-            .clone();
-        Self(shared_memory, store.engine().clone())
+        wasmtime_runtime::Instance::from_vmctx(wasmtime_export.vmctx, |handle| {
+            let memory = handle
+                .get_defined_memory(wasmtime_export.index)
+                .as_mut()
+                .unwrap();
+            let shared_memory = memory
+                .as_shared_memory()
+                .expect("unable to convert from a shared memory")
+                .clone();
+            Self(shared_memory, store.engine().clone())
+        })
     }
 }
 

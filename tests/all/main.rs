@@ -1,7 +1,10 @@
+#![cfg_attr(miri, allow(dead_code, unused_imports))]
+
 mod async_functions;
 mod call_hook;
 mod cli_tests;
 mod component_model;
+mod coredump;
 mod custom_signal_handler;
 mod debug;
 mod epoch_interruption;
@@ -32,7 +35,11 @@ mod table;
 mod threads;
 mod traps;
 mod wait_notify;
+mod wasi_testsuite;
 mod wast;
+// Currently Winch is only supported in x86_64.
+#[cfg(all(target_arch = "x86_64"))]
+mod winch;
 
 /// A helper to compile a module in a new store with reference types enabled.
 pub(crate) fn ref_types_module(
@@ -45,6 +52,12 @@ pub(crate) fn ref_types_module(
 
     let mut config = Config::new();
     config.wasm_reference_types(true);
+
+    if !cfg!(target_arch = "s390x") {
+        // TODO(6530): s390x doesn't support tail calls yet.
+        config.wasm_tail_call(true);
+    }
+
     if use_epochs {
         config.epoch_interruption(true);
     }

@@ -2,7 +2,7 @@ use crate::isa::reg::Reg;
 use std::collections::VecDeque;
 
 /// Value definition to be used within the shadow stack.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub(crate) enum Val {
     /// I32 Constant.
     I32(i32),
@@ -41,6 +41,14 @@ impl Val {
     pub fn is_reg(&self) -> bool {
         match *self {
             Self::Reg(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Check wheter the value is a memory offset.
+    pub fn is_mem(&self) -> bool {
+        match *self {
+            Self::Memory(_) => true,
             _ => false,
         }
     }
@@ -109,6 +117,16 @@ impl Stack {
         }
     }
 
+    /// Insert a new value at the specified index.
+    pub fn insert(&mut self, at: usize, val: Val) {
+        self.inner.insert(at, val);
+    }
+
+    /// Get the length of the stack.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
     /// Push a value to the stack.
     pub fn push(&mut self, val: Val) {
         self.inner.push_back(val);
@@ -117,6 +135,16 @@ impl Stack {
     /// Peek into the top in the stack.
     pub fn peek(&self) -> Option<&Val> {
         self.inner.back()
+    }
+
+    /// Returns an iterator referencing the last n items of the stack,
+    /// in bottom-most to top-most order.
+    pub fn peekn(&self, n: usize) -> impl Iterator<Item = &Val> + '_ {
+        let len = self.len();
+        assert!(n <= len);
+
+        let partition = len - n;
+        self.inner.range(partition..)
     }
 
     /// Pops the top element of the stack, if any.

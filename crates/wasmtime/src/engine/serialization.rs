@@ -21,7 +21,7 @@
 //! other random ELF files, as well as provide better error messages for
 //! using wasmtime artifacts across versions.
 
-use crate::{Engine, ModuleVersionStrategy};
+use crate::{Engine, ModuleVersionStrategy, Precompiled};
 use anyhow::{anyhow, bail, Context, Result};
 use object::write::{Object, StandardSegment};
 use object::{File, FileFlags, Object as _, ObjectSection, SectionKind};
@@ -40,7 +40,7 @@ const VERSION: u8 = 0;
 ///
 /// The blob of bytes is inserted into the object file specified to become part
 /// of the final compiled artifact.
-#[cfg(compiler)]
+#[cfg(any(feature = "cranelift", feature = "winch"))]
 pub fn append_compiler_info(engine: &Engine, obj: &mut Object<'_>) {
     let section = obj.add_section(
         obj.segment_name(StandardSegment::Data).to_vec(),
@@ -145,6 +145,23 @@ pub fn check_compatible(engine: &Engine, mmap: &MmapVec, expected: ObjectKind) -
     bincode::deserialize::<Metadata>(data)?.check_compatible(engine)
 }
 
+pub fn detect_precompiled(bytes: &[u8]) -> Option<Precompiled> {
+    let obj = File::parse(bytes).ok()?;
+    match obj.flags() {
+        FileFlags::Elf {
+            os_abi: obj::ELFOSABI_WASMTIME,
+            abi_version: 0,
+            e_flags: obj::EF_WASMTIME_MODULE,
+        } => Some(Precompiled::Module),
+        FileFlags::Elf {
+            os_abi: obj::ELFOSABI_WASMTIME,
+            abi_version: 0,
+            e_flags: obj::EF_WASMTIME_COMPONENT,
+        } => Some(Precompiled::Component),
+        _ => None,
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Metadata {
     target: String,
@@ -162,16 +179,18 @@ struct WasmFeatures {
     bulk_memory: bool,
     component_model: bool,
     simd: bool,
+    tail_call: bool,
     threads: bool,
     multi_memory: bool,
     exceptions: bool,
     memory64: bool,
     relaxed_simd: bool,
     extended_const: bool,
+    function_references: bool,
 }
 
 impl Metadata {
-    #[cfg(compiler)]
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
     fn new(engine: &Engine) -> Metadata {
         let wasmparser::WasmFeatures {
             reference_types,
@@ -187,6 +206,9 @@ impl Metadata {
             relaxed_simd,
             extended_const,
             memory_control,
+            function_references,
+            gc,
+            component_model_values,
 
             // Always on; we don't currently have knobs for these.
             mutable_global: _,
@@ -196,7 +218,8 @@ impl Metadata {
         } = engine.config().features;
 
         assert!(!memory_control);
-        assert!(!tail_call);
+        assert!(!gc);
+        assert!(!component_model_values);
 
         Metadata {
             target: engine.compiler().triple().to_string(),
@@ -210,11 +233,13 @@ impl Metadata {
                 component_model,
                 simd,
                 threads,
+                tail_call,
                 multi_memory,
                 exceptions,
                 memory64,
                 relaxed_simd,
                 extended_const,
+                function_references,
             },
         }
     }
@@ -307,6 +332,8 @@ impl Metadata {
             epoch_interruption,
             static_memory_bound_is_maximum,
             guard_before_linear_memory,
+            relaxed_simd_deterministic,
+            tail_callable,
 
             // This doesn't affect compilation, it's just a runtime setting.
             dynamic_memory_growth_reserve: _,
@@ -362,6 +389,12 @@ impl Metadata {
             other.guard_before_linear_memory,
             "guard before linear memory",
         )?;
+        Self::check_bool(
+            relaxed_simd_deterministic,
+            other.relaxed_simd_deterministic,
+            "relaxed simd deterministic semantics",
+        )?;
+        Self::check_bool(tail_callable, other.tail_callable, "WebAssembly tail calls")?;
 
         Ok(())
     }
@@ -373,12 +406,14 @@ impl Metadata {
             bulk_memory,
             component_model,
             simd,
+            tail_call,
             threads,
             multi_memory,
             exceptions,
             memory64,
             relaxed_simd,
             extended_const,
+            function_references,
         } = self.features;
 
         Self::check_bool(
@@ -402,6 +437,7 @@ impl Metadata {
             "WebAssembly component model support",
         )?;
         Self::check_bool(simd, other.simd, "WebAssembly SIMD support")?;
+        Self::check_bool(tail_call, other.tail_call, "WebAssembly tail calls support")?;
         Self::check_bool(threads, other.threads, "WebAssembly threads support")?;
         Self::check_bool(
             multi_memory,
@@ -427,6 +463,11 @@ impl Metadata {
             relaxed_simd,
             other.relaxed_simd,
             "WebAssembly relaxed-simd support",
+        )?;
+        Self::check_bool(
+            function_references,
+            other.function_references,
+            "WebAssembly function-references support",
         )?;
 
         Ok(())
@@ -481,9 +522,10 @@ mod test {
         let engine = Engine::default();
         let mut metadata = Metadata::new(&engine);
 
-        metadata
-            .shared_flags
-            .insert("avoid_div_traps".to_string(), FlagValue::Bool(false));
+        metadata.shared_flags.insert(
+            "preserve_frame_pointers".to_string(),
+            FlagValue::Bool(false),
+        );
 
         match metadata.check_compatible(&engine) {
             Ok(_) => unreachable!(),
@@ -492,7 +534,7 @@ mod test {
 compilation settings of module incompatible with native host
 
 Caused by:
-    setting \"avoid_div_traps\" is configured to Bool(false) which is not supported"
+    setting \"preserve_frame_pointers\" is configured to Bool(false) which is not supported"
             )),
         }
 
@@ -523,6 +565,7 @@ Caused by:
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_tunables_int_mismatch() -> Result<()> {
         let engine = Engine::default();
         let mut metadata = Metadata::new(&engine);

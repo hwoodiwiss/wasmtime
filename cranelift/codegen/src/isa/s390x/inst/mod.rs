@@ -3,13 +3,14 @@
 use crate::binemit::{Addend, CodeOffset, Reloc};
 use crate::ir::{types, ExternalName, Opcode, Type};
 use crate::isa::s390x::abi::S390xMachineDeps;
-use crate::isa::CallConv;
+use crate::isa::{CallConv, FunctionAlignment};
 use crate::machinst::*;
 use crate::{settings, CodegenError, CodegenResult};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use regalloc2::{PRegSet, VReg};
 use smallvec::SmallVec;
+use std::fmt::Write;
 use std::string::{String, ToString};
 pub mod regs;
 pub use self::regs::*;
@@ -64,7 +65,15 @@ pub struct CallIndInfo {
 fn inst_size_test() {
     // This test will help with unintentionally growing the size
     // of the Inst enum.
-    assert_eq!(32, std::mem::size_of::<Inst>());
+    //
+    // TODO(#5879): see if we can make `VecRetPair` a box slice to get back to
+    // 32 here.
+    let expected_size = if cfg!(target_arch = "aarch64") || cfg!(target_arch = "riscv64") {
+        48
+    } else {
+        40
+    };
+    assert_eq!(expected_size, std::mem::size_of::<Inst>());
 }
 
 /// A register pair. Enum so it can be destructured in ISLE.
@@ -261,10 +270,10 @@ impl Inst {
                 _ => InstructionSet::Base,
             },
             Inst::FpuRound { op, .. } => match op {
-                FpuRoundOp::ToSInt32 | FpuRoundOp::FromSInt32 => InstructionSet::MIE2,
-                FpuRoundOp::ToUInt32 | FpuRoundOp::FromUInt32 => InstructionSet::MIE2,
-                FpuRoundOp::ToSInt32x4 | FpuRoundOp::FromSInt32x4 => InstructionSet::MIE2,
-                FpuRoundOp::ToUInt32x4 | FpuRoundOp::FromUInt32x4 => InstructionSet::MIE2,
+                FpuRoundOp::ToSInt32 | FpuRoundOp::FromSInt32 => InstructionSet::VXRS_EXT2,
+                FpuRoundOp::ToUInt32 | FpuRoundOp::FromUInt32 => InstructionSet::VXRS_EXT2,
+                FpuRoundOp::ToSInt32x4 | FpuRoundOp::FromSInt32x4 => InstructionSet::VXRS_EXT2,
+                FpuRoundOp::ToUInt32x4 | FpuRoundOp::FromUInt32x4 => InstructionSet::VXRS_EXT2,
                 _ => InstructionSet::Base,
             },
 
@@ -998,6 +1007,7 @@ fn s390x_get_operands<F: Fn(VReg) -> VReg>(inst: &Inst, collector: &mut OperandC
 impl MachInst for Inst {
     type ABIMachineSpec = S390xMachineDeps;
     type LabelUse = LabelUse;
+    const TRAP_OPCODE: &'static [u8] = &[0, 0];
 
     fn get_operands<F: Fn(VReg) -> VReg>(&self, collector: &mut OperandCollector<'_, F>) {
         s390x_get_operands(self, collector);
@@ -1116,6 +1126,7 @@ impl MachInst for Inst {
         match rc {
             RegClass::Int => types::I64,
             RegClass::Float => types::I8X16,
+            RegClass::Vector => unreachable!(),
         }
     }
 
@@ -1140,6 +1151,13 @@ impl MachInst for Inst {
 
     fn gen_dummy_use(reg: Reg) -> Inst {
         Inst::DummyUse { reg }
+    }
+
+    fn function_alignment() -> FunctionAlignment {
+        FunctionAlignment {
+            minimum: 4,
+            preferred: 4,
+        }
     }
 }
 
@@ -3143,18 +3161,26 @@ impl Inst {
             &Inst::Args { ref args } => {
                 let mut s = "args".to_string();
                 for arg in args {
-                    use std::fmt::Write;
                     let preg = pretty_print_reg(arg.preg, &mut empty_allocs);
                     let def = pretty_print_reg(arg.vreg.to_reg(), allocs);
                     write!(&mut s, " {}={}", def, preg).unwrap();
                 }
                 s
             }
-            &Inst::Ret { link, ref rets } => {
+            &Inst::Ret {
+                link,
+                ref rets,
+                stack_bytes_to_pop,
+            } => {
                 debug_assert_eq!(link, gpr(14));
-                let mut s = format!("br {}", show_reg(link));
+                let link = show_reg(link);
+                let mut s = if stack_bytes_to_pop == 0 {
+                    format!("br {link}")
+                } else {
+                    let stack_reg = show_reg(stack_reg());
+                    format!("aghi {stack_reg}, {stack_bytes_to_pop} ; br {link}")
+                };
                 for ret in rets {
-                    use std::fmt::Write;
                     let preg = pretty_print_reg(ret.preg, &mut empty_allocs);
                     let vreg = pretty_print_reg(ret.vreg, allocs);
                     write!(&mut s, " {}={}", vreg, preg).unwrap();
@@ -3184,11 +3210,13 @@ impl Inst {
                 let cond = cond.pretty_print_default();
                 format!("jg{} {}", cond, target)
             }
-            &Inst::Debugtrap => "debugtrap".to_string(),
-            &Inst::Trap { .. } => "trap".to_string(),
-            &Inst::TrapIf { cond, .. } => {
-                let cond = cond.invert().pretty_print_default();
-                format!("j{} 6 ; trap", cond)
+            &Inst::Debugtrap => ".word 0x0001 # debugtrap".to_string(),
+            &Inst::Trap { trap_code } => {
+                format!(".word 0x0000 # trap={}", trap_code)
+            }
+            &Inst::TrapIf { cond, trap_code } => {
+                let cond = cond.pretty_print_default();
+                format!("jg{} .+2 # trap={}", cond, trap_code)
             }
             &Inst::JTSequence { ridx, ref targets } => {
                 let ridx = pretty_print_reg(ridx, allocs);

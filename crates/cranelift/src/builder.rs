@@ -4,17 +4,22 @@
 //! well as providing a function to return the default configuration to build.
 
 use anyhow::Result;
-use cranelift_codegen::isa;
-use cranelift_codegen::settings::{self, Configurable, SetError};
+use cranelift_codegen::{
+    isa::{self, OwnedTargetIsa},
+    CodegenResult,
+};
 use std::fmt;
+use std::path;
 use std::sync::Arc;
-use wasmtime_environ::{CacheStore, CompilerBuilder, Setting, SettingKind};
+use wasmtime_cranelift_shared::isa_builder::IsaBuilder;
+use wasmtime_environ::{CacheStore, CompilerBuilder, Setting, Tunables};
 
 struct Builder {
-    flags: settings::Builder,
-    isa_flags: isa::Builder,
+    tunables: Tunables,
+    inner: IsaBuilder<CodegenResult<OwnedTargetIsa>>,
     linkopts: LinkOptions,
     cache_store: Option<Arc<dyn CacheStore>>,
+    clif_dir: Option<path::PathBuf>,
 }
 
 #[derive(Clone, Default)]
@@ -31,34 +36,27 @@ pub struct LinkOptions {
 }
 
 pub fn builder() -> Box<dyn CompilerBuilder> {
-    let mut flags = settings::builder();
-
-    // There are two possible traps for division, and this way
-    // we get the proper one if code traps.
-    flags
-        .enable("avoid_div_traps")
-        .expect("should be valid flag");
-
-    // We don't use probestack as a stack limit mechanism
-    flags
-        .set("enable_probestack", "false")
-        .expect("should be valid flag");
-
     Box::new(Builder {
-        flags,
-        isa_flags: cranelift_native::builder().expect("host machine is not a supported target"),
+        tunables: Tunables::default(),
+        inner: IsaBuilder::new(|triple| isa::lookup(triple).map_err(|e| e.into())),
         linkopts: LinkOptions::default(),
         cache_store: None,
+        clif_dir: None,
     })
 }
 
 impl CompilerBuilder for Builder {
     fn triple(&self) -> &target_lexicon::Triple {
-        self.isa_flags.triple()
+        self.inner.triple()
+    }
+
+    fn clif_dir(&mut self, path: &path::Path) -> Result<()> {
+        self.clif_dir = Some(path.to_path_buf());
+        Ok(())
     }
 
     fn target(&mut self, target: target_lexicon::Triple) -> Result<()> {
-        self.isa_flags = isa::lookup(target)?;
+        self.inner.target(target)?;
         Ok(())
     }
 
@@ -73,76 +71,46 @@ impl CompilerBuilder for Builder {
             return Ok(());
         }
 
-        // ... then forward this to Cranelift
-        if let Err(err) = self.flags.set(name, value) {
-            match err {
-                SetError::BadName(_) => {
-                    // Try the target-specific flags.
-                    self.isa_flags.set(name, value)?;
-                }
-                _ => return Err(err.into()),
-            }
-        }
-        Ok(())
+        self.inner.set(name, value)
     }
 
     fn enable(&mut self, name: &str) -> Result<()> {
-        if let Err(err) = self.flags.enable(name) {
-            match err {
-                SetError::BadName(_) => {
-                    // Try the target-specific flags.
-                    self.isa_flags.enable(name)?;
-                }
-                _ => return Err(err.into()),
-            }
-        }
+        self.inner.enable(name)
+    }
+
+    fn set_tunables(&mut self, tunables: Tunables) -> Result<()> {
+        self.tunables = tunables;
         Ok(())
     }
 
     fn build(&self) -> Result<Box<dyn wasmtime_environ::Compiler>> {
-        let isa = self
-            .isa_flags
-            .clone()
-            .finish(settings::Flags::new(self.flags.clone()))?;
+        let isa = self.inner.build()?;
         Ok(Box::new(crate::compiler::Compiler::new(
+            self.tunables.clone(),
             isa,
             self.cache_store.clone(),
             self.linkopts.clone(),
+            self.clif_dir.clone(),
         )))
     }
 
     fn settings(&self) -> Vec<Setting> {
-        self.isa_flags
-            .iter()
-            .map(|s| Setting {
-                description: s.description,
-                name: s.name,
-                values: s.values,
-                kind: match s.kind {
-                    settings::SettingKind::Preset => SettingKind::Preset,
-                    settings::SettingKind::Enum => SettingKind::Enum,
-                    settings::SettingKind::Num => SettingKind::Num,
-                    settings::SettingKind::Bool => SettingKind::Bool,
-                },
-            })
-            .collect()
+        self.inner.settings()
     }
 
     fn enable_incremental_compilation(
         &mut self,
         cache_store: Arc<dyn wasmtime_environ::CacheStore>,
-    ) {
+    ) -> Result<()> {
         self.cache_store = Some(cache_store);
+        Ok(())
     }
 }
 
 impl fmt::Debug for Builder {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Builder")
-            .field(
-                "flags",
-                &settings::Flags::new(self.flags.clone()).to_string(),
-            )
+            .field("shared_flags", &self.inner.shared_flags().to_string())
             .finish()
     }
 }

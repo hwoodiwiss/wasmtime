@@ -5,7 +5,6 @@ use clap::Parser;
 use once_cell::sync::Lazy;
 use std::fs;
 use std::path::PathBuf;
-use target_lexicon::Triple;
 use wasmtime::Engine;
 use wasmtime_cli_flags::CommonOptions;
 
@@ -48,11 +47,15 @@ pub struct CompileCommand {
     target: Option<String>,
 
     /// The path of the output compiled module; defaults to <MODULE>.cwasm
-    #[clap(short = 'o', long, value_name = "OUTPUT", parse(from_os_str))]
+    #[clap(short = 'o', long, value_name = "OUTPUT")]
     output: Option<PathBuf>,
 
+    /// The directory path to write clif files into, one clif file per wasm function.
+    #[clap(long = "emit-clif", value_name = "PATH")]
+    emit_clif: Option<PathBuf>,
+
     /// The path of the WebAssembly to compile
-    #[clap(index = 1, value_name = "MODULE", parse(from_os_str))]
+    #[clap(index = 1, value_name = "MODULE")]
     module: PathBuf,
 }
 
@@ -61,12 +64,22 @@ impl CompileCommand {
     pub fn execute(mut self) -> Result<()> {
         self.common.init_logging();
 
-        let target = self
-            .target
-            .take()
-            .unwrap_or_else(|| Triple::host().to_string());
+        let mut config = self.common.config(self.target.as_deref())?;
 
-        let config = self.common.config(Some(&target))?;
+        if let Some(path) = self.emit_clif {
+            if !path.exists() {
+                std::fs::create_dir(&path)?;
+            }
+
+            if !path.is_dir() {
+                bail!(
+                    "the path passed for '--emit-clif' ({}) must be a directory",
+                    path.display()
+                );
+            }
+
+            config.emit_clif(&path);
+        }
 
         let engine = Engine::new(&config)?;
 
@@ -109,7 +122,7 @@ impl CompileCommand {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod test {
     use super::*;
     use std::io::Write;

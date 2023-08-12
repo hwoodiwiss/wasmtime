@@ -39,6 +39,21 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
+        fn u64_as_i32(&mut self, x: u64) -> i32 {
+            x as i32
+        }
+
+        #[inline]
+        fn i32_as_i64(&mut self, x: i32) -> i64 {
+            x.into()
+        }
+
+        #[inline]
+        fn i64_neg(&mut self, x: i64) -> i64 {
+            x.wrapping_neg()
+        }
+
+        #[inline]
         fn u64_add(&mut self, x: u64, y: u64) -> u64 {
             x.wrapping_add(y)
         }
@@ -78,6 +93,11 @@ macro_rules! isle_common_prelude_methods {
         #[inline]
         fn u64_xor(&mut self, x: u64, y: u64) -> u64 {
             x ^ y
+        }
+
+        #[inline]
+        fn u64_shl(&mut self, x: u64, y: u64) -> u64 {
+            x << y
         }
 
         #[inline]
@@ -212,6 +232,51 @@ macro_rules! isle_common_prelude_methods {
             u64::MAX >> shift
         }
 
+        #[inline]
+        fn ty_lane_mask(&mut self, ty: Type) -> u64 {
+            let ty_lane_count = ty.lane_count();
+            debug_assert_ne!(ty_lane_count, 0);
+            let shift = 64_u64
+                .checked_sub(ty_lane_count.into())
+                .expect("unimplemented for > 64 bits");
+            u64::MAX >> shift
+        }
+
+        #[inline]
+        fn ty_lane_count(&mut self, ty: Type) -> u64 {
+            ty.lane_count() as u64
+        }
+
+        #[inline]
+        fn ty_umin(&mut self, _ty: Type) -> u64 {
+            0
+        }
+
+        #[inline]
+        fn ty_umax(&mut self, ty: Type) -> u64 {
+            self.ty_mask(ty)
+        }
+
+        #[inline]
+        fn ty_smin(&mut self, ty: Type) -> u64 {
+            let ty_bits = ty.bits();
+            debug_assert_ne!(ty_bits, 0);
+            let shift = 64_u64
+                .checked_sub(ty_bits.into())
+                .expect("unimplemented for > 64 bits");
+            (i64::MIN as u64) >> shift
+        }
+
+        #[inline]
+        fn ty_smax(&mut self, ty: Type) -> u64 {
+            let ty_bits = ty.bits();
+            debug_assert_ne!(ty_bits, 0);
+            let shift = 64_u64
+                .checked_sub(ty_bits.into())
+                .expect("unimplemented for > 64 bits");
+            (i64::MAX as u64) >> shift
+        }
+
         fn fits_in_16(&mut self, ty: Type) -> Option<Type> {
             if ty.bits() <= 16 && !ty.is_dynamic_vector() {
                 Some(ty)
@@ -256,6 +321,11 @@ macro_rules! isle_common_prelude_methods {
             } else {
                 None
             }
+        }
+
+        #[inline]
+        fn ty_int_ref_scalar_64_extract(&mut self, ty: Type) -> Option<Type> {
+            self.ty_int_ref_scalar_64(ty)
         }
 
         #[inline]
@@ -311,8 +381,25 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
+        fn ty_int_ref_16_to_64(&mut self, ty: Type) -> Option<Type> {
+            match ty {
+                I16 | I32 | I64 | R64 => Some(ty),
+                _ => None,
+            }
+        }
+
+        #[inline]
         fn ty_int(&mut self, ty: Type) -> Option<Type> {
             ty.is_int().then(|| ty)
+        }
+
+        #[inline]
+        fn ty_scalar(&mut self, ty: Type) -> Option<Type> {
+            if ty.lane_count() == 1 {
+                Some(ty)
+            } else {
+                None
+            }
         }
 
         #[inline]
@@ -413,6 +500,14 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
+        fn ty_addr64(&mut self, ty: Type) -> Option<Type> {
+            match ty {
+                I64 | R64 => Some(ty),
+                _ => None,
+            }
+        }
+
+        #[inline]
         fn u64_from_imm64(&mut self, imm: Imm64) -> u64 {
             imm.bits() as u64
         }
@@ -494,8 +589,8 @@ macro_rules! isle_common_prelude_methods {
             }
         }
 
-        fn u64_from_ieee32(&mut self, val: Ieee32) -> u64 {
-            val.bits().into()
+        fn u32_from_ieee32(&mut self, val: Ieee32) -> u32 {
+            val.bits()
         }
 
         fn u64_from_ieee64(&mut self, val: Ieee64) -> u64 {
@@ -547,10 +642,18 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
-        fn s32_add_fallible(&mut self, a: u32, b: u32) -> Option<u32> {
-            let a = a as i32;
-            let b = b as i32;
-            a.checked_add(b).map(|sum| sum as u32)
+        fn u32_sub(&mut self, a: u32, b: u32) -> u32 {
+            a.wrapping_sub(b)
+        }
+
+        #[inline]
+        fn u32_and(&mut self, a: u32, b: u32) -> u32 {
+            a & b
+        }
+
+        #[inline]
+        fn s32_add_fallible(&mut self, a: i32, b: i32) -> Option<i32> {
+            a.checked_add(b)
         }
 
         #[inline]
@@ -600,10 +703,8 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
-        fn simm32(&mut self, x: Imm64) -> Option<u32> {
-            let x64: i64 = x.into();
-            let x32: i32 = x64.try_into().ok()?;
-            Some(x32 as u32)
+        fn simm32(&mut self, x: Imm64) -> Option<i32> {
+            i64::from(x).try_into().ok()
         }
 
         #[inline]
@@ -614,9 +715,8 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
-        fn offset32(&mut self, x: Offset32) -> u32 {
-            let x: i32 = x.into();
-            x as u32
+        fn offset32(&mut self, x: Offset32) -> i32 {
+            x.into()
         }
 
         #[inline]
@@ -625,14 +725,55 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
+        fn u8_shl(&mut self, a: u8, b: u8) -> u8 {
+            a << b
+        }
+
+        #[inline]
+        fn u8_shr(&mut self, a: u8, b: u8) -> u8 {
+            a >> b
+        }
+
+        #[inline]
         fn lane_type(&mut self, ty: Type) -> Type {
             ty.lane_type()
         }
 
         #[inline]
-        fn offset32_to_u32(&mut self, offset: Offset32) -> u32 {
-            let offset: i32 = offset.into();
-            offset as u32
+        fn ty_half_lanes(&mut self, ty: Type) -> Option<Type> {
+            if ty.lane_count() == 1 {
+                None
+            } else {
+                ty.lane_type().by(ty.lane_count() / 2)
+            }
+        }
+
+        #[inline]
+        fn ty_half_width(&mut self, ty: Type) -> Option<Type> {
+            let new_lane = match ty.lane_type() {
+                I16 => I8,
+                I32 => I16,
+                I64 => I32,
+                F64 => F32,
+                _ => return None,
+            };
+
+            new_lane.by(ty.lane_count())
+        }
+
+        #[inline]
+        fn ty_equal(&mut self, lhs: Type, rhs: Type) -> bool {
+            lhs == rhs
+        }
+
+        #[inline]
+        fn offset32_to_i32(&mut self, offset: Offset32) -> i32 {
+            offset.into()
+        }
+
+        #[inline]
+        fn i32_to_offset32(&mut self, offset: i32) -> Offset32 {
+            Offset32::new(offset)
         }
 
         fn range(&mut self, start: usize, end: usize) -> Range {
@@ -739,6 +880,14 @@ macro_rules! isle_common_prelude_methods {
         #[inline]
         fn pack_block_array_2(&mut self, a: BlockCall, b: BlockCall) -> BlockArray2 {
             [a, b]
+        }
+
+        fn u128_as_u64(&mut self, val: u128) -> Option<u64> {
+            u64::try_from(val).ok()
+        }
+
+        fn u64_as_u32(&mut self, val: u64) -> Option<u32> {
+            u32::try_from(val).ok()
         }
     };
 }

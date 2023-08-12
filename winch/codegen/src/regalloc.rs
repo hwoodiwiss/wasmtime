@@ -35,12 +35,23 @@ impl RegAlloc {
         })
     }
 
+    /// Checks if a general purpose register is avaiable.
+    pub fn gpr_available(&self, reg: Reg) -> bool {
+        self.regset.named_gpr_available(reg.hw_enc() as u32)
+    }
+
     /// Request a specific general purpose register,
     /// spilling if not available.
     pub fn gpr<F>(&mut self, named: Reg, spill: &mut F) -> Reg
     where
         F: FnMut(&mut RegAlloc),
     {
+        // If the scratch register is explicitly requested
+        // just return it, it's usage should never cause spills.
+        if named == self.scratch {
+            return named;
+        }
+
         self.regset.gpr(named).unwrap_or_else(|| {
             spill(self);
             self.regset
@@ -51,6 +62,9 @@ impl RegAlloc {
 
     /// Mark a particular general purpose register as available.
     pub fn free_gpr(&mut self, reg: Reg) {
-        self.regset.free_gpr(reg);
+        // Never mark the designated scratch register as allocatable.
+        if reg != self.scratch {
+            self.regset.free_gpr(reg);
+        }
     }
 }
